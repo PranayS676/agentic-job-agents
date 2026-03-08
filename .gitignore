@@ -1,0 +1,17 @@
+﻿.env
+data/*.json
+data/*.db
+output/
+__pycache__/
+
+# Python
+*.pyc
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.qodo/
+
+# OS
+.DS_Store
+Thumbs.db
