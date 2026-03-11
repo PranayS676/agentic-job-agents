@@ -283,9 +283,17 @@ async def test_real_content_pipeline_with_docx_attachment_delivery(
                 row = conn.execute(
                     text(
                         """
-                        SELECT pr.status, rv.docx_path, rv.attachment_path
+                        SELECT
+                            pr.status,
+                            pr.research_output,
+                            rv.docx_path,
+                            rv.attachment_path,
+                            o.channel,
+                            o.status,
+                            o.attachment_path
                         FROM pipeline_runs pr
                         JOIN resume_versions rv ON rv.trace_id = pr.trace_id
+                        LEFT JOIN outbox o ON o.trace_id = pr.trace_id
                         ORDER BY pr.created_at DESC, rv.version_number DESC
                         LIMIT 1
                         """
@@ -293,11 +301,17 @@ async def test_real_content_pipeline_with_docx_attachment_delivery(
                 ).first()
                 assert row is not None
                 assert row[0] == "sent"
-                assert row[1]
+                assert isinstance(row[1], dict)
+                assert row[1]["selected_resume_track"] == "resume_track_python_ml"
+                assert row[1]["experience_target_section"] == "experience_recent_role"
                 assert row[2]
-                assert Path(str(row[1])).is_file()
+                assert row[3]
                 assert Path(str(row[2])).is_file()
-                assert Path(str(row[1])) == Path(str(row[2]))
+                assert Path(str(row[3])).is_file()
+                assert Path(str(row[2])) == Path(str(row[3]))
+                assert row[4] == "email"
+                assert row[5] == "sent"
+                assert Path(str(row[6])) == Path(str(row[3]))
         finally:
             sync_engine.dispose()
     finally:

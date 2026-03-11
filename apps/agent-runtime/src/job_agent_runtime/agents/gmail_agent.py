@@ -1,6 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Literal
 from uuid import UUID
 
 from job_integrations.gmail import GmailConnector
@@ -29,18 +30,29 @@ class GmailAgent(BaseAgent):
             tracer=tracer,
         )
 
-    async def run(self, context: dict[str, Any], trace_id: UUID) -> OutboundResult:
+    async def run(
+        self,
+        context: dict[str, Any],
+        trace_id: UUID,
+        delivery_mode: Literal["send", "draft"] = "send",
+    ) -> OutboundResult:
         poster_email = str(context.get("poster_email") or "").strip()
         if not poster_email:
             raise ValueError("poster_email is required for Gmail routing")
 
         attachment_path = str(context.get("attachment_path") or "").strip() or None
+        if not attachment_path:
+            raise ValueError("attachment_path is required for Gmail routing")
+
         prompt = (
             "Generate outreach email JSON for a job application.\n"
             "Return strict JSON with keys: subject, body.\n\n"
             f"job_title: {context.get('job_title')}\n"
             f"company: {context.get('company')}\n"
             f"job_summary:\n{context.get('job_summary')}\n"
+            f"relevance_decision: {context.get('relevance_decision')}\n"
+            f"delivery_mode: {delivery_mode}\n"
+            f"work_type_hints: {self._derive_work_type_hints(str(context.get('job_summary') or ''))}\n"
             f"recipient_email: {poster_email}\n"
             f"attachment_path: {attachment_path}\n"
         )
@@ -58,14 +70,19 @@ class GmailAgent(BaseAgent):
         if not body:
             raise ValueError("Gmail model output missing body")
 
-        message_id = await self.connector.send(
-            to=poster_email,
-            subject=subject,
-            body=body,
-            attachment_path=attachment_path,
-        )
+        message_id: str | None = None
+        sent = False
+        if delivery_mode == "send":
+            message_id = await self.connector.send(
+                to=poster_email,
+                subject=subject,
+                body=body,
+                attachment_path=attachment_path,
+            )
+            sent = True
+
         return {
-            "sent": True,
+            "sent": sent,
             "channel": "email",
             "recipient": poster_email,
             "subject": subject,
@@ -74,3 +91,11 @@ class GmailAgent(BaseAgent):
             "external_id": message_id,
         }
 
+    def _derive_work_type_hints(self, job_summary: str) -> dict[str, bool]:
+        job_lower = job_summary.lower()
+        return {
+            "mentions_contract": bool(re.search(r"\b(contract|contractor|contract-to-hire|c2h)\b", job_lower)),
+            "mentions_project": bool(re.search(r"\b(project|project-based|project based)\b", job_lower)),
+            "mentions_c2c": bool(re.search(r"\bc2c\b", job_lower)),
+            "mentions_w2": bool(re.search(r"\bw2\b", job_lower)),
+        }

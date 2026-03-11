@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from job_platform.config import Settings, get_settings
@@ -148,36 +149,46 @@ class StubResumeEditorAgent:
 
 
 class StubGmailAgent:
-    async def run(self, context: dict, trace_id: UUID) -> OutboundResult:
+    async def run(
+        self,
+        context: dict,
+        trace_id: UUID,
+        delivery_mode: Literal["send", "draft"] = "send",
+    ) -> OutboundResult:
         body = (
             "Hello, I am interested in this opportunity and have attached my tailored resume. "
             "Please let me know if we can connect."
         )
         return {
-            "sent": True,
+            "sent": delivery_mode == "send",
             "channel": "email",
             "recipient": str(context["poster_email"]),
             "subject": f"Application - {context.get('job_title') or 'Role'}",
             "body_preview": body,
             "attachment_path": context.get("attachment_path"),
-            "external_id": f"stub-email-{str(trace_id)[:8]}",
+            "external_id": f"stub-email-{str(trace_id)[:8]}" if delivery_mode == "send" else None,
         }
 
 
 class StubWhatsAppMsgAgent:
-    async def run(self, context: dict, trace_id: UUID) -> OutboundResult:
+    async def run(
+        self,
+        context: dict,
+        trace_id: UUID,
+        delivery_mode: Literal["send", "draft"] = "send",
+    ) -> OutboundResult:
         body = (
             f"Hi, I'm interested in the {context.get('job_title') or 'role'} opportunity. "
             "Sharing my resume for your review."
         )
         return {
-            "sent": True,
+            "sent": delivery_mode == "send",
             "channel": "whatsapp",
             "recipient": str(context["poster_number"]),
             "subject": None,
             "body_preview": body,
             "attachment_path": context.get("attachment_path"),
-            "external_id": f"stub-whatsapp-{str(trace_id)[:8]}",
+            "external_id": f"stub-whatsapp-{str(trace_id)[:8]}" if delivery_mode == "send" else None,
         }
 
 

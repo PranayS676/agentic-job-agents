@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol, TypedDict
+from typing import Literal, Protocol, TypedDict
 from uuid import UUID
 
 
@@ -102,7 +102,12 @@ class ResumeEditorAgentPort(Protocol):
         ...
 
 class OutboundAgentPort(Protocol):
-    async def run(self, context: dict, trace_id: UUID) -> OutboundResult:
+    async def run(
+        self,
+        context: dict,
+        trace_id: UUID,
+        delivery_mode: Literal["send", "draft"] = "send",
+    ) -> OutboundResult:
         ...
 
 
