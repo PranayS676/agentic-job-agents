@@ -8,7 +8,6 @@ from job_platform.config import Settings, get_settings
 from .contracts import (
     AgentFactoryPort,
     OutboundResult,
-    PDFOutput,
     ResearchOutput,
     ResumeEditOutput,
 )
@@ -30,7 +29,7 @@ class StubResearchAgent:
         if "ml" in job_summary.lower() or "ai" in job_summary.lower():
             add_items.append(
                 {
-                    "section": "experience",
+                    "section": "experience_recent_role",
                     "action": "Emphasize machine learning project outcomes with metrics",
                     "reason": "AI/ML keywords appear in job summary",
                     "priority": 2,
@@ -50,16 +49,24 @@ class StubResearchAgent:
             "add_items": add_items,
             "remove_items": [
                 {
-                    "section": "education",
+                    "section": "skills",
                     "action": "De-emphasize unrelated legacy coursework bullet",
                     "reason": "Creates noise for the target role",
                 }
             ],
             "keywords_to_inject": ["Python", "FastAPI", "LLM"],
-            "sections_to_edit": ["Summary", "Experience", "Projects"],
+            "sections_to_edit": ["summary", "skills", "experience_recent_role"],
             "ats_score_estimate_before": 58,
             "ats_score_estimate_after": 74,
             "research_reasoning": f"Stub research for trace {str(trace_id)[:8]}",
+            "selected_resume_track": "stub_track_python_ml",
+            "selected_resume_source_pdf": "data/resume-library/stub_track_python_ml.pdf",
+            "selected_resume_match_reason": "Stub selected the strongest Python/ML-oriented profile.",
+            "experience_target_section": "experience_recent_role",
+            "summary_focus": "Align the summary to emphasize Python delivery, AI/ML work, and contract readiness.",
+            "skills_gap_notes": ["Highlight FastAPI and LLM orchestration where already evidenced."],
+            "hard_gaps": [],
+            "edit_scope": ["summary", "skills", "experience_recent_role"],
         }
 
 
@@ -67,6 +74,7 @@ class StubResumeEditorAgent:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._run_counter = 0
+        self._track_docx_dir = self._ensure_track_docx_dir()
 
     async def run(
         self,
@@ -78,8 +86,9 @@ class StubResumeEditorAgent:
     ) -> ResumeEditOutput:
         self._run_counter += 1
         version = version_number if version_number >= 1 else self._run_counter
+        research_map = dict(research_output)
 
-        out_dir = Path(self.settings.output_dir) / "resumes"
+        out_dir = Path(self.settings.resolve_path(self.settings.output_dir)) / "resumes"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         company = str(job_context.get("company") or "unknown")
@@ -87,6 +96,10 @@ class StubResumeEditorAgent:
         company_slug = _slugify(company)
         job_slug = _slugify(job_title)
         docx_path = out_dir / f"{company_slug}_{job_slug}_{str(trace_id)[:8]}_v{version}.docx"
+        selected_track = str(research_map.get("selected_resume_track") or "stub_track_python_ml")
+        source_docx_path = self._track_docx_dir / f"{selected_track}.docx"
+        if not source_docx_path.exists():
+            source_docx_path.write_text("stub source docx", encoding="utf-8")
         docx_path.write_text(
             (
                 f"Stub resume content for trace={trace_id}, version={version}, "
@@ -94,8 +107,6 @@ class StubResumeEditorAgent:
             ),
             encoding="utf-8",
         )
-
-        research_map = dict(research_output)
         before_score = int(
             research_map.get(
                 "ats_score_estimate_before",
@@ -113,9 +124,13 @@ class StubResumeEditorAgent:
 
         return {
             "docx_path": str(docx_path),
+            "attachment_path": str(docx_path),
+            "source_docx_path": str(source_docx_path),
+            "selected_resume_track": selected_track,
             "changes_made": {
                 "applied_sections": research_map.get("sections_to_edit", []),
                 "feedback": feedback,
+                "source_docx_bootstrapped_from_base": True,
             },
             "ats_score_before": before_score,
             "ats_score_after": after_score,
@@ -123,23 +138,13 @@ class StubResumeEditorAgent:
             "evaluation_summary": "Stub evaluation complete",
         }
 
-
-class StubPDFConverterAgent:
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
-
-    async def run(self, input_data: dict, trace_id: UUID) -> PDFOutput:
-        docx_path = Path(str(input_data["docx_path"]))
-        out_dir = Path(self.settings.output_dir) / "pdfs"
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        pdf_path = out_dir / f"{docx_path.stem}_{str(trace_id)[:8]}.pdf"
-        pdf_path.write_bytes(b"%PDF-1.4\n% Stub PDF output\n")
-
-        return {
-            "pdf_path": str(pdf_path),
-            "status": "success",
-        }
+    def _ensure_track_docx_dir(self) -> Path:
+        if self.settings.resume_docx_tracks_dir is not None:
+            track_docx_dir = Path(self.settings.resolve_path(self.settings.resume_docx_tracks_dir))
+        else:
+            track_docx_dir = Path(self.settings.resolve_path(self.settings.output_dir)) / "_stub_resume_docx_tracks"
+        track_docx_dir.mkdir(parents=True, exist_ok=True)
+        return track_docx_dir
 
 
 class StubGmailAgent:
@@ -154,7 +159,7 @@ class StubGmailAgent:
             "recipient": str(context["poster_email"]),
             "subject": f"Application - {context.get('job_title') or 'Role'}",
             "body_preview": body,
-            "attachment_path": context.get("pdf_path"),
+            "attachment_path": context.get("attachment_path"),
             "external_id": f"stub-email-{str(trace_id)[:8]}",
         }
 
@@ -171,7 +176,7 @@ class StubWhatsAppMsgAgent:
             "recipient": str(context["poster_number"]),
             "subject": None,
             "body_preview": body,
-            "attachment_path": context.get("pdf_path"),
+            "attachment_path": context.get("attachment_path"),
             "external_id": f"stub-whatsapp-{str(trace_id)[:8]}",
         }
 
@@ -181,7 +186,6 @@ class DefaultStubAgentFactory(AgentFactoryPort):
         self.settings = settings or get_settings()
         self._research = StubResearchAgent()
         self._resume_editor = StubResumeEditorAgent(self.settings)
-        self._pdf_converter = StubPDFConverterAgent(self.settings)
         self._gmail = StubGmailAgent()
         self._whatsapp = StubWhatsAppMsgAgent()
 
@@ -190,9 +194,6 @@ class DefaultStubAgentFactory(AgentFactoryPort):
 
     def create_resume_editor_agent(self) -> StubResumeEditorAgent:
         return self._resume_editor
-
-    def create_pdf_converter_agent(self) -> StubPDFConverterAgent:
-        return self._pdf_converter
 
     def create_gmail_agent(self) -> StubGmailAgent:
         return self._gmail

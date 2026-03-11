@@ -34,7 +34,7 @@ class GmailAgent(BaseAgent):
         if not poster_email:
             raise ValueError("poster_email is required for Gmail routing")
 
-        pdf_path = str(context.get("pdf_path") or "").strip() or None
+        attachment_path = str(context.get("attachment_path") or "").strip() or None
         prompt = (
             "Generate outreach email JSON for a job application.\n"
             "Return strict JSON with keys: subject, body.\n\n"
@@ -42,7 +42,7 @@ class GmailAgent(BaseAgent):
             f"company: {context.get('company')}\n"
             f"job_summary:\n{context.get('job_summary')}\n"
             f"recipient_email: {poster_email}\n"
-            f"attachment_pdf_path: {pdf_path}\n"
+            f"attachment_path: {attachment_path}\n"
         )
         model_result = await self._call_model(
             messages=[{"role": "user", "content": prompt}],
@@ -62,7 +62,7 @@ class GmailAgent(BaseAgent):
             to=poster_email,
             subject=subject,
             body=body,
-            attachment_path=pdf_path,
+            attachment_path=attachment_path,
         )
         return {
             "sent": True,
@@ -70,7 +70,7 @@ class GmailAgent(BaseAgent):
             "recipient": poster_email,
             "subject": subject,
             "body_preview": body[:500],
-            "attachment_path": pdf_path,
+            "attachment_path": attachment_path,
             "external_id": message_id,
         }
 

@@ -13,7 +13,7 @@ metadata:
 - `job_title`
 - `company`
 - `poster_email`
-- `pdf_path`
+- `attachment_path`
 
 ## Rules
 1. Maximum 3 short paragraphs.
@@ -22,7 +22,8 @@ metadata:
 4. End with a direct CTA for a short call.
 5. Keep tone professional and human.
 6. Avoid generic phrases like "I am writing to express my interest".
-7. Output must be valid JSON only.
+7. Refer to the attached resume generically; do not claim the file is a PDF.
+8. Output must be valid JSON only.
 
 ## Subject format
 `{Job Title} Application - Pranay`

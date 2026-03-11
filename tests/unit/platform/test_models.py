@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 
@@ -26,7 +26,6 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "MANAGER_MODEL": "claude-opus-4-6",
         "RESEARCH_MODEL": "claude-sonnet-4-6",
         "RESUME_EDITOR_MODEL": "claude-sonnet-4-6",
-        "PDF_CONVERTER_MODEL": "claude-haiku-4-5-20251001",
         "GMAIL_AGENT_MODEL": "claude-sonnet-4-6",
         "WHATSAPP_MSG_MODEL": "claude-sonnet-4-6",
         "DATABASE_URL": "postgresql+asyncpg://postgres:password@localhost:5432/jobagent",

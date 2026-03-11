@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,7 +27,6 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "MANAGER_MODEL": "claude-opus-4-6",
         "RESEARCH_MODEL": "claude-sonnet-4-6",
         "RESUME_EDITOR_MODEL": "claude-sonnet-4-6",
-        "PDF_CONVERTER_MODEL": "claude-haiku-4-5-20251001",
         "GMAIL_AGENT_MODEL": "claude-sonnet-4-6",
         "WHATSAPP_MSG_MODEL": "claude-sonnet-4-6",
         "DATABASE_URL": "postgresql+asyncpg://postgres:password@localhost:5432/jobagent",
@@ -68,7 +67,7 @@ async def test_gmail_agent_run_success(monkeypatch: pytest.MonkeyPatch, tmp_path
 
     import job_agent_runtime.agents.base_agent as base_agent_module
 
-    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda api_key: SimpleNamespace())  # noqa: ARG005
+    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda *args, **kwargs: SimpleNamespace())  # noqa: ARG005
 
     settings = get_settings()
     connector = SimpleNamespace(send=AsyncMock(return_value="gmail-msg-1"))
@@ -86,7 +85,7 @@ async def test_gmail_agent_run_success(monkeypatch: pytest.MonkeyPatch, tmp_path
             "company": "Acme",
             "job_summary": "Python and ML",
             "poster_email": "recruiter@example.com",
-            "pdf_path": "output/pdfs/resume.pdf",
+            "attachment_path": "output/resumes/resume.docx",
         },
         trace_id=uuid4(),
     )
@@ -104,7 +103,7 @@ async def test_gmail_agent_missing_email(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     import job_agent_runtime.agents.base_agent as base_agent_module
 
-    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda api_key: SimpleNamespace())  # noqa: ARG005
+    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda *args, **kwargs: SimpleNamespace())  # noqa: ARG005
 
     settings = get_settings()
     agent = GmailAgent(

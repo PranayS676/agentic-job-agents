@@ -13,7 +13,7 @@ metadata:
 - `job_title`
 - `company`
 - `poster_number`
-- `pdf_path`
+- `attachment_path`
 
 ## Rules
 1. Maximum 5 sentences.
@@ -21,7 +21,8 @@ metadata:
 3. Include one measurable fit statement.
 4. Mention that resume is attached.
 5. End with clear next-step ask.
-6. Output valid JSON only.
+6. Refer to the attached resume generically; do not claim the file is a PDF.
+7. Output valid JSON only.
 
 ## Output JSON schema
 {

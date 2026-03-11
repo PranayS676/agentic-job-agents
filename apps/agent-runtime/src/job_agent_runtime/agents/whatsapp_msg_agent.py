@@ -34,9 +34,9 @@ class WhatsAppMsgAgent(BaseAgent):
         if not poster_number:
             raise ValueError("poster_number is required for WhatsApp routing")
 
-        pdf_path = str(context.get("pdf_path") or "").strip() or None
-        if not pdf_path:
-            raise ValueError("pdf_path is required for WhatsApp routing")
+        attachment_path = str(context.get("attachment_path") or "").strip() or None
+        if not attachment_path:
+            raise ValueError("attachment_path is required for WhatsApp routing")
 
         prompt = (
             "Generate a WhatsApp outreach message JSON.\n"
@@ -45,7 +45,7 @@ class WhatsAppMsgAgent(BaseAgent):
             f"company: {context.get('company')}\n"
             f"job_summary:\n{context.get('job_summary')}\n"
             f"recipient_number: {poster_number}\n"
-            f"attachment_pdf_path: {pdf_path}\n"
+            f"attachment_path: {attachment_path}\n"
         )
         model_result = await self._call_model(
             messages=[{"role": "user", "content": prompt}],
@@ -72,7 +72,7 @@ class WhatsAppMsgAgent(BaseAgent):
             response = await connector.send_message_with_file(
                 to_number=poster_number,
                 text=message_text,
-                file_path=pdf_path,
+                file_path=attachment_path,
             )
         finally:
             if owns_connector:
@@ -90,7 +90,7 @@ class WhatsAppMsgAgent(BaseAgent):
             "recipient": poster_number,
             "subject": None,
             "body_preview": message_text[:500],
-            "attachment_path": pdf_path,
+            "attachment_path": attachment_path,
             "external_id": external_id,
         }
 

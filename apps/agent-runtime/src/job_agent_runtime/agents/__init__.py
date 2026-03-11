@@ -3,8 +3,6 @@ from .contracts import (
     AgentFactoryPort,
     OutboundAgentPort,
     OutboundResult,
-    PDFConverterAgentPort,
-    PDFOutput,
     QualityGateDecision,
     RelevanceDecision,
     ResearchActionItem,
@@ -15,13 +13,11 @@ from .contracts import (
 )
 from .factories import DefaultAgentFactory
 from .gmail_agent import GmailAgent
-from .pdf_converter_agent import PDFConverterAgent
 from .research_agent import ResearchAgent
 from .resume_editor_agent import ResumeEditorAgent
 from .stub_agents import (
     DefaultStubAgentFactory,
     StubGmailAgent,
-    StubPDFConverterAgent,
     StubResearchAgent,
     StubResumeEditorAgent,
     StubWhatsAppMsgAgent,
@@ -36,9 +32,6 @@ __all__ = [
     "GmailAgent",
     "OutboundAgentPort",
     "OutboundResult",
-    "PDFConverterAgent",
-    "PDFConverterAgentPort",
-    "PDFOutput",
     "QualityGateDecision",
     "RelevanceDecision",
     "ResearchActionItem",
@@ -49,7 +42,6 @@ __all__ = [
     "ResumeEditorAgent",
     "ResumeEditorAgentPort",
     "StubGmailAgent",
-    "StubPDFConverterAgent",
     "StubResearchAgent",
     "StubResumeEditorAgent",
     "StubWhatsAppMsgAgent",
