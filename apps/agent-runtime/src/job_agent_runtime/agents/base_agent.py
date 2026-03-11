@@ -5,6 +5,7 @@ import json
 import time
 import abc
 import pathlib
+import re
 import typing
 from uuid import UUID
 
@@ -20,7 +21,18 @@ class BaseAgent(abc.ABC):
         self.tracer = tracer
 
         self.settings: Settings = get_settings()
-        self.client = AsyncAnthropic(api_key=self.settings.anthropic_api_key.get_secret_value())
+        client_kwargs: dict[str, typing.Any] = {}
+        if self.settings.anthropic_api_key is not None:
+            client_kwargs["api_key"] = self.settings.anthropic_api_key.get_secret_value()
+        if self.settings.anthropic_auth_token is not None:
+            client_kwargs["auth_token"] = self.settings.anthropic_auth_token.get_secret_value()
+        if self.settings.anthropic_base_url:
+            client_kwargs["base_url"] = self.settings.anthropic_base_url
+        if not client_kwargs.get("api_key") and not client_kwargs.get("auth_token"):
+            raise RuntimeError(
+                "BaseAgent requires ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN to initialize the client."
+            )
+        self.client = AsyncAnthropic(**client_kwargs)
 
         self.skill_path = self._resolve_skill_path(skill_path)
         self.system_prompt, self.reference_context = self._load_skill_context()
@@ -77,21 +89,73 @@ class BaseAgent(abc.ABC):
     def _parse_json(self, response_text: str) -> dict:
         text = response_text.strip()
         if text.startswith("```"):
-            lines = text.splitlines()
-            if lines:
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines).strip()
+            text = re.sub(r"^```(?:json)?\s*", "", text, count=1, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text, count=1)
+            text = text.strip()
 
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"Failed to parse JSON response: {response_text}") from exc
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                candidate = text[start : end + 1]
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError:
+                    repaired = self._repair_unescaped_quotes(candidate)
+                    try:
+                        parsed = json.loads(repaired)
+                    except json.JSONDecodeError:
+                        raise ValueError(f"Failed to parse JSON response: {response_text}") from exc
+            else:
+                raise ValueError(f"Failed to parse JSON response: {response_text}") from exc
 
         if not isinstance(parsed, dict):
             raise ValueError(f"Parsed JSON must be an object: {response_text}")
         return parsed
+
+    def _repair_unescaped_quotes(self, text: str) -> str:
+        repaired: list[str] = []
+        in_string = False
+        escaped = False
+
+        for index, char in enumerate(text):
+            if not in_string:
+                repaired.append(char)
+                if char == '"':
+                    in_string = True
+                    escaped = False
+                continue
+
+            if escaped:
+                repaired.append(char)
+                escaped = False
+                continue
+
+            if char == "\\":
+                repaired.append(char)
+                escaped = True
+                continue
+
+            if char == '"':
+                next_significant = self._next_significant_char(text, index + 1)
+                if next_significant in {",", "}", "]", ":"} or next_significant is None:
+                    repaired.append(char)
+                    in_string = False
+                else:
+                    repaired.append('\\"')
+                continue
+
+            repaired.append(char)
+
+        return "".join(repaired)
+
+    def _next_significant_char(self, text: str, start_index: int) -> str | None:
+        for char in text[start_index:]:
+            if not char.isspace():
+                return char
+        return None
 
     async def _call_model(
         self,

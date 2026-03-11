@@ -58,11 +58,15 @@ class ManagerAgent(BaseAgent):
 
         try:
             relevance = await self._evaluate_relevance(message=message, trace_id=trace_id)
+            decision_label = self._decision_label_from_relevance(relevance)
+            decision_score = self._decision_score_from_label(decision_label)
             await self._persist_relevance(trace_id=trace_id, relevance=relevance)
             await self.tracer.update_pipeline_status(
                 trace_id=trace_id,
                 status="relevance_done",
                 stage_data={
+                    "decision": decision_label,
+                    "decision_score": decision_score,
                     "score": relevance["score"],
                     "relevant": relevance["relevant"],
                     "job_title": relevance["job_title"],
@@ -70,22 +74,33 @@ class ManagerAgent(BaseAgent):
                 },
             )
 
-            if (not relevance["relevant"]) or relevance["score"] < self.settings.min_relevance_score:
+            if decision_label == "reject":
                 reason = relevance["discard_reason"] or "Below relevance threshold"
                 await self.tracer.update_pipeline_status(
                     trace_id=trace_id,
                     status="discarded",
-                    stage_data={"reason": reason, "score": relevance["score"]},
+                    stage_data={
+                        "reason": reason,
+                        "score": relevance["score"],
+                        "decision": decision_label,
+                        "decision_score": decision_score,
+                    },
                 )
                 return {
                     "trace_id": str(trace_id),
                     "action": "discarded",
                     "reason": reason,
+                    "decision": decision_label,
+                    "decision_score": decision_score,
                     "relevance_score": relevance["score"],
                 }
 
             stage = "research"
-            research_output = await self._run_research(relevance=relevance, trace_id=trace_id)
+            research_output = await self._run_research(
+                message=message,
+                relevance=relevance,
+                trace_id=trace_id,
+            )
             await self.tracer.update_pipeline_status(
                 trace_id=trace_id,
                 status="research_done",
@@ -99,30 +114,22 @@ class ManagerAgent(BaseAgent):
                 job_context={
                     "company": relevance["company"],
                     "job_title": relevance["job_title"],
+                    "relevance_decision": decision_label,
+                    "relevance_decision_score": decision_score,
                 },
                 feedback=None,
             )
+            attachment_path = self._resume_attachment_path(resume_output)
             await self.tracer.update_pipeline_status(
                 trace_id=trace_id,
                 status="resume_ready",
                 stage_data={
                     "version_number": version_number,
                     "docx_path": resume_output["docx_path"],
+                    "attachment_path": attachment_path,
                     "ats_score_after": resume_output["ats_score_after"],
                     "evaluator_passed": resume_output["evaluator_passed"],
                 },
-            )
-
-            stage = "pdf_conversion"
-            pdf_output = await self._run_pdf_conversion(
-                trace_id=trace_id,
-                docx_path=resume_output["docx_path"],
-                resume_version_id=resume_version_id,
-            )
-            await self.tracer.update_pipeline_status(
-                trace_id=trace_id,
-                status="pdf_ready",
-                stage_data={"pdf_path": pdf_output["pdf_path"], "version_number": version_number},
             )
 
             stage = "quality_gate"
@@ -149,33 +156,21 @@ class ManagerAgent(BaseAgent):
                     job_context={
                         "company": relevance["company"],
                         "job_title": relevance["job_title"],
+                        "relevance_decision": decision_label,
+                        "relevance_decision_score": decision_score,
                     },
                     feedback=quality_decision["feedback"],
                 )
+                attachment_path = self._resume_attachment_path(resume_output)
                 await self.tracer.update_pipeline_status(
                     trace_id=trace_id,
                     status="resume_ready",
                     stage_data={
                         "version_number": version_number,
                         "docx_path": resume_output["docx_path"],
+                        "attachment_path": attachment_path,
                         "ats_score_after": resume_output["ats_score_after"],
                         "evaluator_passed": resume_output["evaluator_passed"],
-                        "retry_count": retry_count,
-                    },
-                )
-
-                stage = "pdf_conversion_retry"
-                pdf_output = await self._run_pdf_conversion(
-                    trace_id=trace_id,
-                    docx_path=resume_output["docx_path"],
-                    resume_version_id=resume_version_id,
-                )
-                await self.tracer.update_pipeline_status(
-                    trace_id=trace_id,
-                    status="pdf_ready",
-                    stage_data={
-                        "pdf_path": pdf_output["pdf_path"],
-                        "version_number": version_number,
                         "retry_count": retry_count,
                     },
                 )
@@ -282,8 +277,10 @@ class ManagerAgent(BaseAgent):
     async def _evaluate_relevance(self, message: WhatsAppMessage, trace_id: UUID) -> RelevanceDecision:
         user_prompt = (
             "Evaluate whether this WhatsApp message is relevant to a Python/AI/ML/Data role.\n"
-            "Return strict JSON with keys: relevant, score, job_title, company, job_summary, "
-            "poster_email, poster_number, discard_reason, relevance_reason.\n\n"
+            "Use exactly three decision buckets based on score: reject=0-4, okayish=5-6, fit=7-10.\n"
+            "Return strict JSON with keys: decision, relevant, score, job_title, company, job_summary, "
+            "poster_email, poster_number, discard_reason, relevance_reason.\n"
+            "Keep job_summary concise and factual. Keep relevance_reason concise and evidence-based.\n\n"
             f"group_id: {message.group_id}\n"
             f"sender_number: {message.sender_number}\n"
             f"message_text:\n{message.message_text}"
@@ -291,12 +288,18 @@ class ManagerAgent(BaseAgent):
         model_result = await self._call_model(
             messages=[{"role": "user", "content": user_prompt}],
             trace_id=trace_id,
-            max_tokens=1024,
+            max_tokens=512,
         )
         parsed = self._parse_json(model_result["text"])
         return self._coerce_relevance_decision(parsed, message)
 
-    async def _run_research(self, relevance: RelevanceDecision, trace_id: UUID) -> ResearchOutput:
+    async def _run_research(
+        self,
+        *,
+        message: WhatsAppMessage,
+        relevance: RelevanceDecision,
+        trace_id: UUID,
+    ) -> ResearchOutput:
         research_agent = ResearchAgent(
             db_session=self.db_session,
             tracer=self.tracer,
@@ -306,9 +309,14 @@ class ManagerAgent(BaseAgent):
             "job_title": relevance["job_title"],
             "company": relevance["company"],
             "job_summary": relevance["job_summary"],
+            "full_job_text": message.message_text,
             "poster_email": relevance["poster_email"],
             "poster_number": relevance["poster_number"],
             "relevance_score": relevance["score"],
+            "relevance_decision": self._decision_label_from_relevance(relevance),
+            "relevance_decision_score": self._decision_score_from_label(
+                self._decision_label_from_relevance(relevance)
+            ),
         }
         return await research_agent.run(job_data=job_data, trace_id=trace_id)
 
@@ -334,20 +342,6 @@ class ManagerAgent(BaseAgent):
             version_number=version_number,
         )
         return output, version_id, version_number
-
-    async def _run_pdf_conversion(
-        self,
-        trace_id: UUID,
-        docx_path: str,
-        resume_version_id: UUID,
-    ) -> dict[str, Any]:
-        pdf_converter = self.agent_factory.create_pdf_converter_agent()
-        output = await pdf_converter.run(input_data={"docx_path": docx_path}, trace_id=trace_id)
-        await self._attach_pdf_path(
-            resume_version_id=resume_version_id,
-            pdf_path=output["pdf_path"],
-        )
-        return output
 
     async def _run_quality_gate(
         self,
@@ -475,6 +469,7 @@ class ManagerAgent(BaseAgent):
                 trace_id,
                 version_number,
                 docx_path,
+                attachment_path,
                 changes_made,
                 ats_score_before,
                 ats_score_after,
@@ -484,6 +479,7 @@ class ManagerAgent(BaseAgent):
                 :trace_id,
                 :version_number,
                 :docx_path,
+                :attachment_path,
                 CAST(:changes_made AS jsonb),
                 :ats_score_before,
                 :ats_score_after,
@@ -499,6 +495,7 @@ class ManagerAgent(BaseAgent):
                     "trace_id": trace_id,
                     "version_number": version_number,
                     "docx_path": resume_output["docx_path"],
+                    "attachment_path": self._resume_attachment_path(resume_output),
                     "changes_made": self._to_json(resume_output["changes_made"]),
                     "ats_score_before": int(resume_output["ats_score_before"]),
                     "ats_score_after": int(resume_output["ats_score_after"]),
@@ -527,22 +524,6 @@ class ManagerAgent(BaseAgent):
         )
         return max(1, version_number)
 
-    async def _attach_pdf_path(self, resume_version_id: UUID, pdf_path: str) -> None:
-        update_stmt = text(
-            """
-            UPDATE resume_versions
-            SET pdf_path = :pdf_path
-            WHERE id = :resume_version_id
-            """
-        )
-        result = await self.db_session.execute(
-            update_stmt,
-            {"resume_version_id": resume_version_id, "pdf_path": pdf_path},
-        )
-        if result.rowcount == 0:
-            raise ValueError(f"resume_versions row not found for id={resume_version_id}")
-        await self.db_session.flush()
-
     async def _persist_quality_gate_result(self, trace_id: UUID, quality_result: dict[str, Any]) -> None:
         update_stmt = text(
             """
@@ -570,7 +551,7 @@ class ManagerAgent(BaseAgent):
                 pr.job_summary,
                 pr.poster_email,
                 pr.poster_number,
-                rv.pdf_path
+                rv.attachment_path
             FROM pipeline_runs pr
             JOIN resume_versions rv ON rv.trace_id = pr.trace_id
             WHERE pr.trace_id = :trace_id
@@ -656,10 +637,8 @@ class ManagerAgent(BaseAgent):
             score = 0
         score = max(0, min(10, score))
 
-        if "relevant" in payload:
-            relevant = bool(payload.get("relevant"))
-        else:
-            relevant = score >= self.settings.min_relevance_score
+        decision = self._normalize_decision_label(payload.get("decision"), score=score)
+        relevant = decision != "reject"
 
         job_title = str(payload.get("job_title") or "Unknown Title")
         company = str(payload.get("company") or "Unknown Company")
@@ -680,10 +659,12 @@ class ManagerAgent(BaseAgent):
         discard_reason = payload.get("discard_reason")
         if discard_reason is not None:
             discard_reason = str(discard_reason).strip() or None
-        if discard_reason is None and ((not relevant) or score < self.settings.min_relevance_score):
+        if discard_reason is None and decision == "reject":
             discard_reason = "Message did not match target profile threshold"
 
         return {
+            "decision": decision,
+            "decision_score": self._decision_score_from_label(decision),
             "relevant": relevant,
             "score": score,
             "job_title": job_title,
@@ -694,6 +675,35 @@ class ManagerAgent(BaseAgent):
             "discard_reason": discard_reason,
             "relevance_reason": relevance_reason,
         }
+
+    def _normalize_decision_label(self, raw_value: Any, *, score: int) -> str:
+        cleaned = str(raw_value or "").strip().lower()
+        if cleaned in {"fit", "okayish", "reject"}:
+            return cleaned
+        if cleaned == "relevant":
+            return "fit"
+        if cleaned == "borderline":
+            return "okayish"
+        if score <= 4:
+            return "reject"
+        if score <= 6:
+            return "okayish"
+        return "fit"
+
+    def _decision_label_from_relevance(self, relevance: RelevanceDecision | dict[str, Any]) -> str:
+        score_raw = relevance.get("score", 0)
+        try:
+            score = int(score_raw)
+        except (TypeError, ValueError):
+            score = 0
+        return self._normalize_decision_label(relevance.get("decision"), score=score)
+
+    def _decision_score_from_label(self, decision: str) -> float:
+        if decision == "reject":
+            return 0.0
+        if decision == "okayish":
+            return 0.5
+        return 1.0
 
     def _build_failed_outbound_result(self, context: dict[str, Any], error_message: str) -> OutboundResult:
         poster_email = str(context.get("poster_email") or "").strip()
@@ -706,9 +716,17 @@ class ManagerAgent(BaseAgent):
             "recipient": recipient,
             "subject": None,
             "body_preview": error_message[:500],
-            "attachment_path": str(context.get("pdf_path") or "").strip() or None,
+            "attachment_path": str(context.get("attachment_path") or "").strip() or None,
             "external_id": None,
         }
+
+    def _resume_attachment_path(self, resume_output: ResumeEditOutput | dict[str, Any]) -> str:
+        attachment_path = str(
+            resume_output.get("attachment_path") or resume_output.get("docx_path") or ""
+        ).strip()
+        if not attachment_path:
+            raise ValueError("resume_output must include attachment_path or docx_path")
+        return attachment_path
 
     def _ensure_row_exists(self, rowcount: int | None, trace_id: UUID) -> None:
         if rowcount is None or rowcount == 0:

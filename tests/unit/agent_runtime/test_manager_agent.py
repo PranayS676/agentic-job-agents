@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,7 +27,6 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "MANAGER_MODEL": "claude-opus-4-6",
         "RESEARCH_MODEL": "claude-sonnet-4-6",
         "RESUME_EDITOR_MODEL": "claude-sonnet-4-6",
-        "PDF_CONVERTER_MODEL": "claude-haiku-4-5-20251001",
         "GMAIL_AGENT_MODEL": "claude-sonnet-4-6",
         "WHATSAPP_MSG_MODEL": "claude-sonnet-4-6",
         "DATABASE_URL": "postgresql+asyncpg://postgres:password@localhost:5432/jobagent",
@@ -88,7 +87,7 @@ def _build_manager(
 
     import job_agent_runtime.agents.base_agent as base_agent_module
 
-    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda api_key: _FakeAnthropic())  # noqa: ARG005
+    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda *args, **kwargs: _FakeAnthropic())  # noqa: ARG005
 
     tracer = _Tracer()
     db_session = SimpleNamespace(execute=AsyncMock(), flush=AsyncMock())
@@ -122,10 +121,18 @@ def _sample_research_output() -> dict:
             }
         ],
         "keywords_to_inject": ["Python"],
-        "sections_to_edit": ["Summary"],
+        "sections_to_edit": ["summary", "skills", "experience_recent_role"],
         "ats_score_estimate_before": 55,
         "ats_score_estimate_after": 75,
         "research_reasoning": "Strong role alignment after targeted edits.",
+        "selected_resume_track": "resume_track_python_ml",
+        "selected_resume_source_pdf": "data/resume-library/resume_track_python_ml.pdf",
+        "selected_resume_match_reason": "Strongest Python and AI/ML evidence density.",
+        "experience_target_section": "experience_recent_role",
+        "summary_focus": "Align the summary around Python delivery, AI/ML depth, and contract readiness.",
+        "skills_gap_notes": ["Add FastAPI and LLM orchestration where already evidenced."],
+        "hard_gaps": [],
+        "edit_scope": ["summary", "skills", "experience_recent_role"],
     }
 
 
@@ -194,7 +201,7 @@ async def test_happy_path_email_routing(monkeypatch: pytest.MonkeyPatch, tmp_pat
         )
     )
     manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
-        return_value={"pdf_path": "output/pdfs/resume.pdf", "status": "success"}
+        return_value={"attachment_path": "output/resumes/resume.docx", "status": "success"}
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
         return_value={
@@ -215,7 +222,7 @@ async def test_happy_path_email_routing(monkeypatch: pytest.MonkeyPatch, tmp_pat
             "job_summary": "Python and ML",
             "poster_email": "recruiter@example.com",
             "poster_number": None,
-            "pdf_path": "output/pdfs/resume.pdf",
+            "attachment_path": "output/resumes/resume.docx",
         }
     )
     manager._run_routing = AsyncMock(  # type: ignore[method-assign]
@@ -225,7 +232,7 @@ async def test_happy_path_email_routing(monkeypatch: pytest.MonkeyPatch, tmp_pat
             "recipient": "recruiter@example.com",
             "subject": "Application - ML Engineer",
             "body_preview": "hello",
-            "attachment_path": "output/pdfs/resume.pdf",
+            "attachment_path": "output/resumes/resume.docx",
             "external_id": "stub-email-123",
         }
     )
@@ -277,7 +284,7 @@ async def test_whatsapp_routing_when_email_missing(monkeypatch: pytest.MonkeyPat
         )
     )
     manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
-        return_value={"pdf_path": "output/pdfs/resume.pdf", "status": "success"}
+        return_value={"attachment_path": "output/resumes/resume.docx", "status": "success"}
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
         return_value={
@@ -298,7 +305,7 @@ async def test_whatsapp_routing_when_email_missing(monkeypatch: pytest.MonkeyPat
             "job_summary": "Python backend",
             "poster_email": None,
             "poster_number": "+15550000009",
-            "pdf_path": "output/pdfs/resume.pdf",
+            "attachment_path": "output/resumes/resume.docx",
         }
     )
     manager._run_routing = AsyncMock(  # type: ignore[method-assign]
@@ -308,7 +315,7 @@ async def test_whatsapp_routing_when_email_missing(monkeypatch: pytest.MonkeyPat
             "recipient": "+15550000009",
             "subject": None,
             "body_preview": "hello",
-            "attachment_path": "output/pdfs/resume.pdf",
+            "attachment_path": "output/resumes/resume.docx",
             "external_id": "stub-whatsapp-123",
         }
     )
@@ -372,8 +379,8 @@ async def test_quality_gate_retry_then_pass(monkeypatch: pytest.MonkeyPatch, tmp
     )
     manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
         side_effect=[
-            {"pdf_path": "output/pdfs/resume_v1.pdf", "status": "success"},
-            {"pdf_path": "output/pdfs/resume_v2.pdf", "status": "success"},
+            {"attachment_path": "output/resumes/resume_v1.docx", "status": "success"},
+            {"attachment_path": "output/resumes/resume_v2.docx", "status": "success"},
         ]
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
@@ -406,7 +413,7 @@ async def test_quality_gate_retry_then_pass(monkeypatch: pytest.MonkeyPatch, tmp
             "job_summary": "Python and ML",
             "poster_email": "recruiter@example.com",
             "poster_number": None,
-            "pdf_path": "output/pdfs/resume_v2.pdf",
+            "attachment_path": "output/resumes/resume_v2.docx",
         }
     )
     manager._run_routing = AsyncMock(  # type: ignore[method-assign]
@@ -416,7 +423,7 @@ async def test_quality_gate_retry_then_pass(monkeypatch: pytest.MonkeyPatch, tmp
             "recipient": "recruiter@example.com",
             "subject": "Application",
             "body_preview": "hello",
-            "attachment_path": "output/pdfs/resume_v2.pdf",
+            "attachment_path": "output/resumes/resume_v2.docx",
             "external_id": "stub-email-456",
         }
     )
@@ -482,8 +489,8 @@ async def test_quality_gate_fails_after_retry(monkeypatch: pytest.MonkeyPatch, t
     )
     manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
         side_effect=[
-            {"pdf_path": "output/pdfs/resume_v1.pdf", "status": "success"},
-            {"pdf_path": "output/pdfs/resume_v2.pdf", "status": "success"},
+            {"attachment_path": "output/resumes/resume_v1.docx", "status": "success"},
+            {"attachment_path": "output/resumes/resume_v2.docx", "status": "success"},
         ]
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
@@ -584,7 +591,11 @@ async def test_run_research_delegates_to_research_agent(
     import job_agent_runtime.orchestration.manager as manager_module
 
     monkeypatch.setattr(manager_module, "ResearchAgent", _FakeResearchAgent)
-    result = await manager._run_research(relevance=relevance, trace_id=trace_id)
+    result = await manager._run_research(
+        message=_sample_message("full JD text"),
+        relevance=relevance,
+        trace_id=trace_id,
+    )
 
     assert result == expected
     assert captured["db_session"] is manager.db_session
@@ -593,6 +604,7 @@ async def test_run_research_delegates_to_research_agent(
     assert captured["trace_id"] == trace_id
     assert captured["job_data"]["job_title"] == "ML Engineer"
     assert captured["job_data"]["company"] == "Acme"
+    assert captured["job_data"]["full_job_text"] == "full JD text"
 
 
 @pytest.mark.asyncio
@@ -679,7 +691,7 @@ async def test_dry_run_mode_skips_routing(monkeypatch: pytest.MonkeyPatch, tmp_p
         )
     )
     manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
-        return_value={"pdf_path": "output/pdfs/resume.pdf", "status": "success"}
+        return_value={"attachment_path": "output/resumes/resume.docx", "status": "success"}
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
         return_value={
@@ -740,7 +752,7 @@ async def test_outbound_exception_persists_failed_outbox(
         )
     )
     manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
-        return_value={"pdf_path": "output/pdfs/resume.pdf", "status": "success"}
+        return_value={"attachment_path": "output/resumes/resume.docx", "status": "success"}
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
         return_value={
@@ -761,7 +773,7 @@ async def test_outbound_exception_persists_failed_outbox(
             "job_summary": "Python and ML",
             "poster_email": "recruiter@example.com",
             "poster_number": None,
-            "pdf_path": "output/pdfs/resume.pdf",
+            "attachment_path": "output/resumes/resume.docx",
         }
     )
     manager._run_routing = AsyncMock(side_effect=RuntimeError("send boom"))  # type: ignore[method-assign]
@@ -817,7 +829,7 @@ async def test_outbound_sent_false_marks_failure(
         )
     )
     manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
-        return_value={"pdf_path": "output/pdfs/resume.pdf", "status": "success"}
+        return_value={"attachment_path": "output/resumes/resume.docx", "status": "success"}
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
         return_value={
@@ -838,7 +850,7 @@ async def test_outbound_sent_false_marks_failure(
             "job_summary": "Python and ML",
             "poster_email": "recruiter@example.com",
             "poster_number": None,
-            "pdf_path": "output/pdfs/resume.pdf",
+            "attachment_path": "output/resumes/resume.docx",
         }
     )
     manager._run_routing = AsyncMock(  # type: ignore[method-assign]
@@ -848,7 +860,7 @@ async def test_outbound_sent_false_marks_failure(
             "recipient": "recruiter@example.com",
             "subject": "Apply",
             "body_preview": "failed",
-            "attachment_path": "output/pdfs/resume.pdf",
+            "attachment_path": "output/resumes/resume.docx",
             "external_id": None,
         }
     )
@@ -860,5 +872,8 @@ async def test_outbound_sent_false_marks_failure(
 
     manager._persist_outbound_result.assert_awaited_once()
     assert manager._mark_failure.await_count == 1
+
+
+
 
 

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from pathlib import Path
@@ -26,7 +26,6 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "MANAGER_MODEL": "claude-opus-4-6",
         "RESEARCH_MODEL": "claude-sonnet-4-6",
         "RESUME_EDITOR_MODEL": "claude-sonnet-4-6",
-        "PDF_CONVERTER_MODEL": "claude-haiku-4-5-20251001",
         "GMAIL_AGENT_MODEL": "claude-sonnet-4-6",
         "WHATSAPP_MSG_MODEL": "claude-sonnet-4-6",
         "DATABASE_URL": "postgresql+asyncpg://postgres:password@localhost:5432/jobagent",
@@ -125,7 +124,10 @@ def _build_agent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, messages_impl=
     monkeypatch.setattr(
         base_agent,
         "AsyncAnthropic",
-        lambda api_key: _FakeAnthropic(api_key=api_key, messages_impl=messages_impl),
+        lambda *args, **kwargs: _FakeAnthropic(
+            api_key=kwargs.get("api_key"),
+            messages_impl=messages_impl,
+        ),
     )
 
     class DummyAgent(base_agent.BaseAgent):
@@ -152,7 +154,11 @@ def test_missing_skill_file_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 
     import job_agent_runtime.agents.base_agent as base_agent
 
-    monkeypatch.setattr(base_agent, "AsyncAnthropic", lambda api_key: _FakeAnthropic(api_key=api_key))
+    monkeypatch.setattr(
+        base_agent,
+        "AsyncAnthropic",
+        lambda *args, **kwargs: _FakeAnthropic(api_key=kwargs.get("api_key")),
+    )
 
     class DummyAgent(base_agent.BaseAgent):
         async def run(self, input_data: dict, trace_id):  # noqa: ARG002

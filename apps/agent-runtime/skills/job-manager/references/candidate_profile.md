@@ -1,12 +1,8 @@
 # Candidate Profile
 
-Name: Pranay
-Current Role: AI Engineer
-Email: your@email.com
-LinkedIn: https://www.linkedin.com/in/your-profile
-Phone: +1-000-000-0000
-Location: Remote / United States
-
-## Notes
-- Keep this file updated with latest role, links, and preferred location.
-- Manager and outbound agents use this for consistent outreach context.
+- 5+ years in AI / ML / Python engineering
+- strongest in LLM apps, RAG, agents, Python backend, ML/platform delivery
+- strong overlap with AWS, GCP, Databricks, PySpark, Docker, PostgreSQL, observability
+- valid adjacent fit for cloud/platform/data roles when Python, AI enablement, observability, or platform engineering is central
+- employment preference: C2C strongest, project-based strong, W2 in scope, full-time not auto-rejected
+- do not over-penalize posted seniority if the technical scope is a strong fit
