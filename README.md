@@ -165,6 +165,29 @@ Health now includes:
 - `last_poll_completed_at`
 - `last_webhook_at`
 
+## Backend Ops API
+The backend now exposes a small read-only operator API for future dashboard work.
+
+Available endpoints:
+- `GET /api/ops/overview`
+- `GET /api/ops/review-queue?limit=20`
+- `GET /api/ops/pipeline-runs?limit=50`
+- `GET /api/ops/polling-status`
+
+Examples:
+```bash
+curl http://localhost:8000/api/ops/overview
+curl "http://localhost:8000/api/ops/review-queue?limit=20"
+curl "http://localhost:8000/api/ops/pipeline-runs?limit=50"
+curl http://localhost:8000/api/ops/polling-status
+```
+
+Use these endpoints to confirm:
+- backlog size
+- review queue size
+- recent pipeline terminal states
+- per-group polling cursor health
+
 ## Gmail Setup
 1. Enable Gmail API in Google Cloud.
 2. Put OAuth client credentials at `data/credentials.json`.
@@ -188,7 +211,7 @@ python -m poetry run pytest -q
 
 Run backend-focused tests:
 ```bash
-python -m poetry run pytest tests/unit/backend/test_ingest_webhook.py tests/unit/backend/test_waha_polling.py tests/integration/backend/test_ingest_integration.py tests/integration/backend/test_polling_catchup_integration.py -q
+python -m poetry run pytest tests/unit/backend/test_ingest_webhook.py tests/unit/backend/test_waha_polling.py tests/integration/backend/test_ingest_integration.py tests/integration/backend/test_polling_catchup_integration.py tests/integration/backend/test_ops_api_integration.py -q
 ```
 
 Run agent-runtime-focused tests:
@@ -228,6 +251,32 @@ Run live Gmail integration:
 ```bash
 python -m poetry run pytest tests/integration/system/test_gmail_live.py -q
 ```
+
+Run Step 8 deterministic system validation:
+```bash
+python -m poetry run pytest tests/integration/system/test_system_validation_integration.py -q
+```
+
+Run the supervised live system validation harness:
+```bash
+python -m poetry run python scripts/run_system_validation_live.py --cases output/system_validation/cases.json
+```
+
+If any case is allowed to send externally, require the explicit flag:
+```bash
+python -m poetry run python scripts/run_system_validation_live.py --cases output/system_validation/cases.json --allow-live-send
+```
+
+The live runner writes review artifacts under:
+- `output/system_validation/run_<timestamp>/summary.json`
+- `output/system_validation/run_<timestamp>/summary.md`
+- one subdirectory per case with DB and ops API snapshots
+
+Recommended startup order for Step 8:
+1. Start WAHA and PostgreSQL
+2. Start `job-backend`
+3. Start `job-agent-runtime` only when you want backlog drained
+4. Use `/api/ops/overview` and `/api/ops/review-queue` to confirm system state
 
 ## Observability SQL
 Recent pipeline runs:
