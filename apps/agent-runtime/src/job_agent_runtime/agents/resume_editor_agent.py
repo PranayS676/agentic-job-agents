@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -46,15 +47,15 @@ class ResumeEditorAgent(BaseAgent):
         if version_number < 1:
             raise ValueError("version_number must be >= 1")
 
-        if self.settings.base_resume_docx is None:
-            raise FileNotFoundError("BASE_RESUME_DOCX is not configured")
-        base_docx_path = self.settings.resolve_path(self.settings.base_resume_docx)
-        if not base_docx_path.is_file():
-            raise FileNotFoundError(f"BASE_RESUME_DOCX file not found: {base_docx_path}")
+        selected_track = str(research_output.get("selected_resume_track") or "").strip()
+        if not selected_track:
+            raise ValueError("research_output.selected_resume_track is required")
+        source_docx_path = self._resolve_source_docx_for_track(selected_track)
+        source_docx_metadata = self._source_docx_metadata(source_docx_path)
 
-        document = Document(str(base_docx_path))
+        document = Document(str(source_docx_path))
         section_texts, section_paragraphs = self._extract_sections(document)
-        sections_to_edit = [self._canonical_key(section) for section in research_output["sections_to_edit"]]
+        sections_to_edit = self._normalize_sections_to_edit(research_output)
         target_sections = {
             section_key: section_texts.get(section_key, "")
             for section_key in sections_to_edit
@@ -64,6 +65,10 @@ class ResumeEditorAgent(BaseAgent):
             "research_output": research_output,
             "target_sections": target_sections,
             "feedback": feedback,
+            "job_context": job_context,
+            "selected_resume_track": selected_track,
+            "source_docx_path": str(source_docx_path),
+            "source_docx_bootstrapped_from_base": source_docx_metadata["bootstrapped_from_base"],
         }
         prompt = (
             "Apply targeted edits to resume sections only. Return strict JSON with keys "
@@ -77,6 +82,11 @@ class ResumeEditorAgent(BaseAgent):
         )
         parsed = self._parse_json(model_result["text"])
         edited_sections, changes_applied, evaluation = self._coerce_editor_output(parsed)
+        self._validate_hard_gap_compliance(
+            research_output=research_output,
+            target_sections=target_sections,
+            edited_sections=edited_sections,
+        )
 
         applied_sections, skipped_sections = self._apply_section_edits(
             document=document,
@@ -118,18 +128,42 @@ class ResumeEditorAgent(BaseAgent):
 
         return {
             "docx_path": str(output_docx),
+            "attachment_path": str(output_docx),
+            "source_docx_path": str(source_docx_path),
+            "selected_resume_track": selected_track,
             "changes_made": {
                 "edited_sections": edited_sections,
                 "applied_sections": applied_sections,
                 "skipped_sections": skipped_sections,
                 "changes_applied": changes_applied,
                 "evaluation": evaluation,
+                "source_docx_bootstrapped_from_base": source_docx_metadata["bootstrapped_from_base"],
             },
             "ats_score_before": before_score or 0,
             "ats_score_after": after_score,
             "evaluator_passed": checklist_passed,
             "evaluation_summary": evaluation_summary,
         }
+
+    def _resolve_source_docx_for_track(self, selected_track: str) -> Path:
+        if self.settings.resume_docx_tracks_dir is None:
+            raise FileNotFoundError("RESUME_DOCX_TRACKS_DIR is not configured")
+
+        docx_tracks_dir = self.settings.resolve_path(self.settings.resume_docx_tracks_dir)
+        source_docx_path = docx_tracks_dir / f"{selected_track}.docx"
+        if not source_docx_path.is_file():
+            raise FileNotFoundError(
+                f"Editable source DOCX not found for selected track {selected_track!r}: {source_docx_path}"
+            )
+        return source_docx_path
+
+    def _source_docx_metadata(self, source_docx_path: Path) -> dict[str, bool]:
+        bootstrapped_from_base = False
+        if self.settings.base_resume_docx is not None:
+            base_docx_path = self.settings.resolve_path(self.settings.base_resume_docx)
+            if base_docx_path.is_file():
+                bootstrapped_from_base = self._file_digest(source_docx_path) == self._file_digest(base_docx_path)
+        return {"bootstrapped_from_base": bootstrapped_from_base}
 
     def _extract_sections(
         self,
@@ -139,17 +173,23 @@ class ResumeEditorAgent(BaseAgent):
         current_section = "body"
         section_paragraphs[current_section] = []
         seen_sections: set[str] = {current_section}
+        experience_count = 0
 
         for index, paragraph in enumerate(document.paragraphs):
             text = paragraph.text.strip()
             if not text:
                 continue
             if self._is_section_heading(paragraph):
-                base_key = self._canonical_key(text)
-                section_key = base_key or "section"
+                base_key = self._normalize_docx_heading(text)
+                if base_key == "experience":
+                    section_key = "experience_recent_role" if experience_count == 0 else f"experience_prior_role_{experience_count}"
+                    experience_count += 1
+                else:
+                    section_key = base_key or "section"
+                section_key_base = section_key
                 suffix = 2
                 while section_key in seen_sections:
-                    section_key = f"{base_key}_{suffix}"
+                    section_key = f"{section_key_base}_{suffix}"
                     suffix += 1
                 seen_sections.add(section_key)
                 current_section = section_key
@@ -231,7 +271,10 @@ class ResumeEditorAgent(BaseAgent):
                 skipped[raw_section] = "section not in sections_to_edit"
                 continue
 
-            resolved_key = key_map.get(section_key)
+            resolved_key = self._resolve_document_section_key(
+                requested_section=section_key,
+                available_keys=section_paragraphs,
+            )
             if resolved_key is None:
                 skipped[raw_section] = "section not found in base resume"
                 continue
@@ -248,6 +291,71 @@ class ResumeEditorAgent(BaseAgent):
             applied[resolved_key] = edited_text
 
         return applied, skipped
+
+    def _normalize_sections_to_edit(self, research_output: ResearchOutput) -> list[str]:
+        raw_sections = research_output.get("sections_to_edit") or []
+        sections_to_edit = [self._canonical_key(section) for section in raw_sections]
+        expected_experience_section = self._canonical_key(research_output["experience_target_section"])
+        experience_sections = [section for section in sections_to_edit if section.startswith("experience_")]
+        if set(sections_to_edit) != {"summary", "skills", expected_experience_section}:
+            raise ValueError(
+                "sections_to_edit must contain exactly summary, skills, and the selected experience target section"
+            )
+        if len(experience_sections) != 1:
+            raise ValueError("sections_to_edit must contain exactly one experience_* section")
+        return sections_to_edit
+
+    def _validate_hard_gap_compliance(
+        self,
+        *,
+        research_output: ResearchOutput,
+        target_sections: dict[str, str],
+        edited_sections: dict[str, str],
+    ) -> None:
+        combined_source_text = "\n".join(target_sections.values()).lower()
+        forbidden_keywords: set[str] = set()
+        for gap in research_output.get("hard_gaps", []):
+            gap_upper = str(gap).upper()
+            if "GCP" in gap_upper and "gcp" not in combined_source_text:
+                forbidden_keywords.add("gcp")
+            if "AZURE" in gap_upper and "azure" not in combined_source_text:
+                forbidden_keywords.add("azure")
+            if "AWS" in gap_upper and "aws" not in combined_source_text:
+                forbidden_keywords.add("aws")
+        if not forbidden_keywords:
+            return
+
+        for section_name, section_text in edited_sections.items():
+            lowered = section_text.lower()
+            for keyword in forbidden_keywords:
+                if keyword in lowered:
+                    raise ValueError(
+                        f"Hard gap compliance failed: edited section {section_name!r} introduces forbidden keyword {keyword!r}"
+                    )
+
+    def _resolve_document_section_key(
+        self,
+        *,
+        requested_section: str,
+        available_keys: dict[str, list[int]],
+    ) -> str | None:
+        if requested_section in available_keys:
+            return requested_section
+        if requested_section.startswith("experience_"):
+            for key in available_keys:
+                if key.startswith("experience_"):
+                    return key
+        return None
+
+    def _normalize_docx_heading(self, value: str) -> str:
+        canonical = self._canonical_key(value)
+        if canonical in {"relevant_experience", "professional_experience", "work_experience", "experience"}:
+            return "experience"
+        if canonical in {"technical_skills", "tools_technologies", "tools_and_technologies", "skills"}:
+            return "skills"
+        if canonical in {"professional_summary", "career_summary", "summary", "profile"}:
+            return "summary"
+        return canonical
 
     def _document_to_text(self, document: Document) -> str:
         return "\n".join(paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip())
@@ -308,4 +416,7 @@ class ResumeEditorAgent(BaseAgent):
 
     def _slugify(self, value: str) -> str:
         return self._canonical_key(value) or "unknown"
+
+    def _file_digest(self, path: Path) -> str:
+        return sha256(path.read_bytes()).hexdigest()
 

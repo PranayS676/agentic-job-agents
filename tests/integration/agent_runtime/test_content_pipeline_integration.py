@@ -1,9 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
 import re
-import shutil
 from pathlib import Path
 
 import pytest
@@ -87,9 +86,15 @@ def _set_required_runtime_env(
 ) -> None:
     data_dir = tmp_path / "data"
     output_dir = tmp_path / "output"
+    resume_library_dir = data_dir / "resume-library"
+    resume_tracks_dir = data_dir / "resume-tracks"
+    resume_docx_tracks_dir = data_dir / "resume-docx-tracks"
     skills_dir = ROOT_DIR / "apps" / "agent-runtime" / "skills"
     data_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+    resume_library_dir.mkdir(parents=True, exist_ok=True)
+    resume_tracks_dir.mkdir(parents=True, exist_ok=True)
+    resume_docx_tracks_dir.mkdir(parents=True, exist_ok=True)
 
     base_resume_docx = data_dir / "base_resume.docx"
     doc = Document()
@@ -97,19 +102,39 @@ def _set_required_runtime_env(
     doc.add_paragraph("Old summary text.")
     doc.add_heading("Skills", level=1)
     doc.add_paragraph("Python, SQL")
+    doc.add_heading("Relevant Experience", level=1)
+    doc.add_paragraph("Built ML services on AWS.")
     doc.save(str(base_resume_docx))
 
     base_resume_text = data_dir / "base_resume.md"
     credentials = data_dir / "credentials.json"
     base_resume_text.write_text("Candidate resume text", encoding="utf-8")
     credentials.write_text("{}", encoding="utf-8")
+    track_payload = {
+        "display_name": "Python ML Track",
+        "raw_text": "Summary\nPython ML engineer\nSkills\nPython AWS LLM\nExperience\nRecent ML role",
+        "normalized_text": "Summary\nPython ML engineer\nSkills\nPython AWS LLM\nExperience\nRecent ML role",
+        "sections": {
+            "summary": "Python ML engineer",
+            "skills": "Python\nAWS\nLLM",
+            "experience_recent_role": "Built ML services on AWS.",
+            "education": "MS Computer Science",
+        },
+        "role_bias": ["ai_ml", "backend_python", "cloud_platform"],
+        "keywords": ["python", "aws", "llm", "machine learning"],
+    }
+    for suffix in ("python_ml", "data_platform", "general_backend"):
+        payload = dict(track_payload)
+        payload["track_id"] = f"resume_track_{suffix}"
+        payload["source_pdf_path"] = str(resume_library_dir / f"resume_track_{suffix}.pdf")
+        (resume_tracks_dir / f"resume_track_{suffix}.json").write_text(json.dumps(payload), encoding="utf-8")
+        doc.save(str(resume_docx_tracks_dir / f"resume_track_{suffix}.docx"))
 
     env = {
         "ANTHROPIC_API_KEY": "sk-ant-test",
         "MANAGER_MODEL": "claude-opus-4-6",
         "RESEARCH_MODEL": "claude-sonnet-4-6",
         "RESUME_EDITOR_MODEL": "claude-sonnet-4-6",
-        "PDF_CONVERTER_MODEL": "claude-haiku-4-5-20251001",
         "GMAIL_AGENT_MODEL": "claude-sonnet-4-6",
         "WHATSAPP_MSG_MODEL": "claude-sonnet-4-6",
         "DATABASE_URL": database_url,
@@ -128,6 +153,9 @@ def _set_required_runtime_env(
         "MAX_RESUME_EDIT_ITERATIONS": "2",
         "BASE_RESUME_DOCX": str(base_resume_docx),
         "BASE_RESUME_TEXT": str(base_resume_text),
+        "RESUME_LIBRARY_DIR": str(resume_library_dir),
+        "RESUME_TRACKS_DIR": str(resume_tracks_dir),
+        "RESUME_DOCX_TRACKS_DIR": str(resume_docx_tracks_dir),
         "OUTPUT_DIR": str(output_dir),
         "SKILLS_DIR": str(skills_dir),
         "LOG_LEVEL": "INFO",
@@ -139,13 +167,10 @@ def _set_required_runtime_env(
 
 
 @pytest.mark.asyncio
-async def test_real_content_pipeline_with_pdf_conversion(
+async def test_real_content_pipeline_with_docx_attachment_delivery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    if shutil.which("libreoffice") is None and shutil.which("soffice") is None:
-        pytest.skip("LibreOffice not installed; skipping real PDF conversion integration test.")
-
     async_test_url = os.getenv("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
     sync_test_url = _async_to_sync_url(async_test_url)
 
@@ -176,7 +201,7 @@ async def test_real_content_pipeline_with_pdf_conversion(
             }
             return {"text": json.dumps(payload)}
 
-        if "job summary:" in content and "candidate resume:" in content:
+        if "shortlisted_tracks" in content and "selected_resume_track" in content:
             payload = {
                 "add_items": [
                     {
@@ -188,10 +213,18 @@ async def test_real_content_pipeline_with_pdf_conversion(
                 ],
                 "remove_items": [],
                 "keywords_to_inject": ["Python", "LLM"],
-                "sections_to_edit": ["summary"],
+                "sections_to_edit": ["summary", "skills", "experience_recent_role"],
                 "ats_score_estimate_before": 55,
                 "ats_score_estimate_after": 78,
                 "research_reasoning": "Focus on summary alignment.",
+                "selected_resume_track": "resume_track_python_ml",
+                "selected_resume_source_pdf": "data/resume-library/resume_track_python_ml.pdf",
+                "selected_resume_match_reason": "Strongest Python and ML evidence density.",
+                "experience_target_section": "experience_recent_role",
+                "summary_focus": "Reframe the summary around Python and LLM delivery impact.",
+                "skills_gap_notes": ["Surface grounded LLM and FastAPI terminology."],
+                "hard_gaps": [],
+                "edit_scope": ["summary", "skills", "experience_recent_role"],
             }
             return {"text": json.dumps(payload), "input_tokens": 30, "output_tokens": 40, "latency_ms": 5}
 
@@ -250,7 +283,7 @@ async def test_real_content_pipeline_with_pdf_conversion(
                 row = conn.execute(
                     text(
                         """
-                        SELECT pr.status, rv.docx_path, rv.pdf_path
+                        SELECT pr.status, rv.docx_path, rv.attachment_path
                         FROM pipeline_runs pr
                         JOIN resume_versions rv ON rv.trace_id = pr.trace_id
                         ORDER BY pr.created_at DESC, rv.version_number DESC
@@ -264,6 +297,7 @@ async def test_real_content_pipeline_with_pdf_conversion(
                 assert row[2]
                 assert Path(str(row[1])).is_file()
                 assert Path(str(row[2])).is_file()
+                assert Path(str(row[1])) == Path(str(row[2]))
         finally:
             sync_engine.dispose()
     finally:

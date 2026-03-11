@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -17,9 +17,11 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     output_dir = tmp_path / "output"
     skills_dir = tmp_path / "skills"
+    resume_docx_tracks_dir = data_dir / "resume-docx-tracks"
     data_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     skills_dir.mkdir(parents=True, exist_ok=True)
+    resume_docx_tracks_dir.mkdir(parents=True, exist_ok=True)
 
     base_docx = data_dir / "base_resume.docx"
     doc = Document()
@@ -27,7 +29,11 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     doc.add_paragraph("Old summary text.")
     doc.add_heading("Skills", level=1)
     doc.add_paragraph("Python, SQL")
+    doc.add_heading("Relevant Experience", level=1)
+    doc.add_paragraph("Built production ML services.")
     doc.save(str(base_docx))
+    track_docx = resume_docx_tracks_dir / "resume_track_python_ml.docx"
+    doc.save(str(track_docx))
 
     (data_dir / "base_resume.md").write_text("resume text", encoding="utf-8")
     (data_dir / "credentials.json").write_text("{}", encoding="utf-8")
@@ -37,7 +43,6 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "MANAGER_MODEL": "claude-opus-4-6",
         "RESEARCH_MODEL": "claude-sonnet-4-6",
         "RESUME_EDITOR_MODEL": "claude-sonnet-4-6",
-        "PDF_CONVERTER_MODEL": "claude-haiku-4-5-20251001",
         "GMAIL_AGENT_MODEL": "claude-sonnet-4-6",
         "WHATSAPP_MSG_MODEL": "claude-sonnet-4-6",
         "DATABASE_URL": "postgresql+asyncpg://postgres:password@localhost:5432/jobagent",
@@ -55,6 +60,7 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "MAX_RESUME_EDIT_ITERATIONS": "2",
         "BASE_RESUME_DOCX": str(base_docx),
         "BASE_RESUME_TEXT": str(data_dir / "base_resume.md"),
+        "RESUME_DOCX_TRACKS_DIR": str(resume_docx_tracks_dir),
         "OUTPUT_DIR": str(output_dir),
         "SKILLS_DIR": str(skills_dir),
         "LOG_LEVEL": "INFO",
@@ -73,7 +79,9 @@ def _create_skill_files(tmp_path: Path) -> None:
     scripts_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text("# Resume Editor Agent", encoding="utf-8")
     (references_dir / "style_rules.md").write_text("Keep style concise.", encoding="utf-8")
-    (references_dir / "base_resume.md").write_text("Summary...", encoding="utf-8")
+    (references_dir / "section_rules.md").write_text("Edit only summary, skills, and one experience section.", encoding="utf-8")
+    (references_dir / "before_after_examples.md").write_text("Before and after examples.", encoding="utf-8")
+    (references_dir / "forbidden_edits.md").write_text("Do not fabricate cloud experience.", encoding="utf-8")
     (scripts_dir / "ats_scorer.py").write_text(
         "import json\nimport argparse\n"
         "p=argparse.ArgumentParser();p.add_argument('--resume-file');p.add_argument('--keywords');a=p.parse_args();"
@@ -92,7 +100,7 @@ def _build_agent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ResumeEdito
     monkeypatch.setattr(
         base_agent_module,
         "AsyncAnthropic",
-        lambda api_key: SimpleNamespace(messages=SimpleNamespace(create=AsyncMock())),  # noqa: ARG005
+        lambda *args, **kwargs: SimpleNamespace(messages=SimpleNamespace(create=AsyncMock())),  # noqa: ARG005
     )
     db_session = SimpleNamespace(execute=AsyncMock(), flush=AsyncMock())
     tracer = SimpleNamespace(trace=AsyncMock())
@@ -111,10 +119,18 @@ def _research_output() -> dict:
         ],
         "remove_items": [],
         "keywords_to_inject": ["Python", "LLM"],
-        "sections_to_edit": ["summary"],
+        "sections_to_edit": ["summary", "skills", "experience_recent_role"],
         "ats_score_estimate_before": 50,
         "ats_score_estimate_after": 72,
         "research_reasoning": "Focus on ML impact in summary.",
+        "selected_resume_track": "resume_track_python_ml",
+        "selected_resume_source_pdf": "data/resume-library/resume_track_python_ml.pdf",
+        "selected_resume_match_reason": "Strongest Python and ML evidence density.",
+        "experience_target_section": "experience_recent_role",
+        "summary_focus": "Align the summary around Python and ML delivery impact.",
+        "skills_gap_notes": ["Surface grounded FastAPI and LLM keywords."],
+        "hard_gaps": [],
+        "edit_scope": ["summary", "skills", "experience_recent_role"],
     }
 
 
@@ -135,7 +151,7 @@ async def test_run_applies_only_target_sections_and_uses_filename_contract(
     model_payload = {
         "edited_sections": {
             "summary": "Updated summary with Python and LLM impact.",
-            "skills": "SHOULD_NOT_APPLY",
+            "education": "SHOULD_NOT_APPLY",
         },
         "changes_applied": ["Updated summary line"],
         "evaluation": {
@@ -149,11 +165,13 @@ async def test_run_applies_only_target_sections_and_uses_filename_contract(
     result = await agent.run(
         research_output=_research_output(),
         trace_id=trace_id,
-        job_context={"company": "Acme Inc", "job_title": "ML Engineer"},
+        job_context={"company": "Acme Inc", "job_title": "ML Engineer", "relevance_decision": "fit"},
         version_number=3,
     )
 
     assert result["docx_path"].endswith(f"acme_inc_ml_engineer_{str(trace_id)[:8]}_v3.docx")
+    assert result["selected_resume_track"] == "resume_track_python_ml"
+    assert result["source_docx_path"].endswith("resume_track_python_ml.docx")
     output_doc = Document(result["docx_path"])
     all_text = "\n".join(p.text for p in output_doc.paragraphs)
     assert "Updated summary with Python and LLM impact." in all_text
@@ -193,7 +211,7 @@ async def test_run_handles_plain_and_fenced_json(
     result = await agent.run(
         research_output=_research_output(),
         trace_id=uuid4(),
-        job_context={"company": "Acme", "job_title": "ML Engineer"},
+        job_context={"company": "Acme", "job_title": "ML Engineer", "relevance_decision": "fit"},
         version_number=1,
     )
     assert result["ats_score_after"] == 70
@@ -210,24 +228,25 @@ async def test_run_invalid_schema_raises(
         await agent.run(
             research_output=_research_output(),
             trace_id=uuid4(),
-            job_context={"company": "Acme", "job_title": "ML Engineer"},
+            job_context={"company": "Acme", "job_title": "ML Engineer", "relevance_decision": "fit"},
             version_number=1,
         )
 
 
 @pytest.mark.asyncio
-async def test_run_missing_base_docx_raises(
+async def test_run_missing_track_docx_raises(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     agent = _build_agent(monkeypatch, tmp_path)
-    Path(agent.settings.base_resume_docx).unlink(missing_ok=True)
+    track_docx_path = Path(agent.settings.resume_docx_tracks_dir) / "resume_track_python_ml.docx"
+    track_docx_path.unlink(missing_ok=True)
     agent._call_model = AsyncMock(return_value={"text": "{}"})  # type: ignore[method-assign]
-    with pytest.raises(FileNotFoundError, match="BASE_RESUME_DOCX"):
+    with pytest.raises(FileNotFoundError, match="Editable source DOCX not found"):
         await agent.run(
             research_output=_research_output(),
             trace_id=uuid4(),
-            job_context={"company": "Acme", "job_title": "ML Engineer"},
+            job_context={"company": "Acme", "job_title": "ML Engineer", "relevance_decision": "fit"},
             version_number=1,
         )
 
@@ -248,7 +267,7 @@ async def test_run_uses_ats_scorer_fallback_when_after_missing(
     result = await agent.run(
         research_output=_research_output(),
         trace_id=uuid4(),
-        job_context={"company": "Acme", "job_title": "ML Engineer"},
+        job_context={"company": "Acme", "job_title": "ML Engineer", "relevance_decision": "fit"},
         version_number=1,
     )
     assert result["ats_score_after"] == 77
