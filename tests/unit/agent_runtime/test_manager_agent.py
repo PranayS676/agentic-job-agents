@@ -136,6 +136,20 @@ def _sample_research_output() -> dict:
     }
 
 
+def _sample_resume_output(*, path: str = "output/resumes/resume.docx", ats_after: int = 75) -> dict:
+    return {
+        "docx_path": path,
+        "attachment_path": path,
+        "source_docx_path": "data/resume-docx-tracks/resume_track_python_ml.docx",
+        "selected_resume_track": "resume_track_python_ml",
+        "changes_made": {"Summary": "updated"},
+        "ats_score_before": 55,
+        "ats_score_after": ats_after,
+        "evaluator_passed": ats_after >= 65,
+        "evaluation_summary": "good" if ats_after >= 65 else "needs work",
+    }
+
+
 @pytest.mark.asyncio
 async def test_relevance_discard_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     manager, tracer = _build_manager(monkeypatch, tmp_path)
@@ -188,20 +202,10 @@ async def test_happy_path_email_routing(monkeypatch: pytest.MonkeyPatch, tmp_pat
     )
     manager._run_resume_edit = AsyncMock(  # type: ignore[method-assign]
         return_value=(
-            {
-                "docx_path": "output/resumes/resume.docx",
-                "changes_made": {"Summary": "updated"},
-                "ats_score_before": 55,
-                "ats_score_after": 75,
-                "evaluator_passed": True,
-                "evaluation_summary": "good",
-            },
+            _sample_resume_output(),
             uuid4(),
             1,
         )
-    )
-    manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
-        return_value={"attachment_path": "output/resumes/resume.docx", "status": "success"}
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
         return_value={
@@ -244,6 +248,83 @@ async def test_happy_path_email_routing(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert result["action"] == "sent"
     assert result["channel"] == "email"
     assert "sent" in tracer.statuses
+    assert manager._run_routing.await_args.kwargs["delivery_mode"] == "send"
+    assert manager._persist_outbound_result.await_args.kwargs["outbox_status"] == "sent"
+    assert manager._mark_failure.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_okayish_email_routing_requires_review(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manager, tracer = _build_manager(monkeypatch, tmp_path)
+    trace_id = uuid4()
+
+    manager._evaluate_relevance = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "decision": "okayish",
+            "decision_score": 0.5,
+            "relevant": True,
+            "score": 6,
+            "job_title": "Cloud Data Engineer",
+            "company": "Acme",
+            "job_summary": "W2 cloud data role",
+            "poster_email": "recruiter@example.com",
+            "poster_number": None,
+            "discard_reason": None,
+            "relevance_reason": "Adjacent cloud/data fit",
+        }
+    )
+    manager._persist_relevance = AsyncMock()  # type: ignore[method-assign]
+    manager._run_research = AsyncMock(return_value=_sample_research_output())  # type: ignore[method-assign]
+    manager._run_resume_edit = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            _sample_resume_output(),
+            uuid4(),
+            1,
+        )
+    )
+    manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "passed": True,
+            "model_pass": True,
+            "criteria_pass": True,
+            "feedback": "",
+            "reason": "pass",
+            "evaluator_passed": True,
+            "ats_score_after": 75,
+        }
+    )
+    manager._persist_quality_gate_result = AsyncMock()  # type: ignore[method-assign]
+    manager._load_routing_context = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "job_title": "Cloud Data Engineer",
+            "company": "Acme",
+            "job_summary": "W2 cloud data role",
+            "poster_email": "recruiter@example.com",
+            "poster_number": None,
+            "attachment_path": "output/resumes/resume.docx",
+        }
+    )
+    manager._run_routing = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "sent": False,
+            "channel": "email",
+            "recipient": "recruiter@example.com",
+            "subject": "Cloud Data Engineer - Pranay",
+            "body_preview": "Draft review body",
+            "attachment_path": "output/resumes/resume.docx",
+            "external_id": None,
+        }
+    )
+    manager._persist_outbound_result = AsyncMock()  # type: ignore[method-assign]
+    manager._mark_failure = AsyncMock()  # type: ignore[method-assign]
+
+    result = await manager.run(message=_sample_message(), trace_id=trace_id)
+
+    assert result["action"] == "review_required"
+    assert result["channel"] == "email"
+    assert "review_required" in tracer.statuses
+    assert manager._run_routing.await_args.kwargs["delivery_mode"] == "draft"
+    assert manager._persist_outbound_result.await_args.kwargs["outbox_status"] == "review_required"
     assert manager._mark_failure.await_count == 0
 
 
@@ -271,20 +352,10 @@ async def test_whatsapp_routing_when_email_missing(monkeypatch: pytest.MonkeyPat
     )
     manager._run_resume_edit = AsyncMock(  # type: ignore[method-assign]
         return_value=(
-            {
-                "docx_path": "output/resumes/resume.docx",
-                "changes_made": {},
-                "ats_score_before": 50,
-                "ats_score_after": 70,
-                "evaluator_passed": True,
-                "evaluation_summary": "good",
-            },
+            _sample_resume_output(ats_after=70),
             uuid4(),
             1,
         )
-    )
-    manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
-        return_value={"attachment_path": "output/resumes/resume.docx", "status": "success"}
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
         return_value={
@@ -325,6 +396,127 @@ async def test_whatsapp_routing_when_email_missing(monkeypatch: pytest.MonkeyPat
 
     assert result["action"] == "sent"
     assert result["channel"] == "whatsapp"
+    assert manager._run_routing.await_args.kwargs["delivery_mode"] == "send"
+
+
+@pytest.mark.asyncio
+async def test_okayish_whatsapp_routing_requires_review(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manager, tracer = _build_manager(monkeypatch, tmp_path)
+    trace_id = uuid4()
+
+    manager._evaluate_relevance = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "decision": "okayish",
+            "decision_score": 0.5,
+            "relevant": True,
+            "score": 6,
+            "job_title": "Cloud Data Engineer",
+            "company": "Acme",
+            "job_summary": "W2 cloud data role",
+            "poster_email": None,
+            "poster_number": "+15550000009",
+            "discard_reason": None,
+            "relevance_reason": "Adjacent cloud/data fit",
+        }
+    )
+    manager._persist_relevance = AsyncMock()  # type: ignore[method-assign]
+    manager._run_research = AsyncMock(return_value=_sample_research_output())  # type: ignore[method-assign]
+    manager._run_resume_edit = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            _sample_resume_output(),
+            uuid4(),
+            1,
+        )
+    )
+    manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "passed": True,
+            "model_pass": True,
+            "criteria_pass": True,
+            "feedback": "",
+            "reason": "pass",
+            "evaluator_passed": True,
+            "ats_score_after": 75,
+        }
+    )
+    manager._persist_quality_gate_result = AsyncMock()  # type: ignore[method-assign]
+    manager._load_routing_context = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "job_title": "Cloud Data Engineer",
+            "company": "Acme",
+            "job_summary": "W2 cloud data role",
+            "poster_email": None,
+            "poster_number": "+15550000009",
+            "attachment_path": "output/resumes/resume.docx",
+        }
+    )
+    manager._run_routing = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "sent": False,
+            "channel": "whatsapp",
+            "recipient": "+15550000009",
+            "subject": None,
+            "body_preview": "Draft review body",
+            "attachment_path": "output/resumes/resume.docx",
+            "external_id": None,
+        }
+    )
+    manager._persist_outbound_result = AsyncMock()  # type: ignore[method-assign]
+    manager._mark_failure = AsyncMock()  # type: ignore[method-assign]
+
+    result = await manager.run(message=_sample_message(), trace_id=trace_id)
+
+    assert result["action"] == "review_required"
+    assert result["channel"] == "whatsapp"
+    assert "review_required" in tracer.statuses
+    assert manager._run_routing.await_args.kwargs["delivery_mode"] == "draft"
+    assert manager._persist_outbound_result.await_args.kwargs["outbox_status"] == "review_required"
+    assert manager._mark_failure.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_run_routing_passes_draft_mode_to_whatsapp_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager, _ = _build_manager(monkeypatch, tmp_path)
+    called: dict[str, str] = {}
+
+    class _FakeWhatsAppAgent:
+        async def run(self, context, trace_id, delivery_mode="send"):  # noqa: ANN001, ARG002
+            called["delivery_mode"] = delivery_mode
+            called["recipient"] = str(context["poster_number"])
+            return {
+                "sent": False,
+                "channel": "whatsapp",
+                "recipient": str(context["poster_number"]),
+                "subject": None,
+                "body_preview": "draft",
+                "attachment_path": context["attachment_path"],
+                "external_id": None,
+            }
+
+    manager.agent_factory = SimpleNamespace(create_whatsapp_agent=lambda: _FakeWhatsAppAgent())
+
+    result = await manager._run_routing(
+        trace_id=uuid4(),
+        context={
+            "job_title": "Platform Engineer",
+            "company": "Acme",
+            "job_summary": "Adjacent platform role",
+            "poster_email": None,
+            "poster_number": "+15550000009",
+            "attachment_path": "output/resumes/resume.docx",
+        },
+        delivery_mode="draft",
+    )
+
+    assert called["delivery_mode"] == "draft"
+    assert called["recipient"] == "+15550000009"
+    assert result["channel"] == "whatsapp"
+    assert result["sent"] is False
 
 
 @pytest.mark.asyncio
@@ -353,10 +545,7 @@ async def test_quality_gate_retry_then_pass(monkeypatch: pytest.MonkeyPatch, tmp
         side_effect=[
             (
                 {
-                    "docx_path": "output/resumes/resume_v1.docx",
-                    "changes_made": {},
-                    "ats_score_before": 52,
-                    "ats_score_after": 62,
+                    **_sample_resume_output(path="output/resumes/resume_v1.docx", ats_after=62),
                     "evaluator_passed": False,
                     "evaluation_summary": "first try failed",
                 },
@@ -365,22 +554,13 @@ async def test_quality_gate_retry_then_pass(monkeypatch: pytest.MonkeyPatch, tmp
             ),
             (
                 {
-                    "docx_path": "output/resumes/resume_v2.docx",
-                    "changes_made": {},
+                    **_sample_resume_output(path="output/resumes/resume_v2.docx", ats_after=76),
                     "ats_score_before": 62,
-                    "ats_score_after": 76,
-                    "evaluator_passed": True,
                     "evaluation_summary": "retry passed",
                 },
                 uuid4(),
                 2,
             ),
-        ]
-    )
-    manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
-        side_effect=[
-            {"attachment_path": "output/resumes/resume_v1.docx", "status": "success"},
-            {"attachment_path": "output/resumes/resume_v2.docx", "status": "success"},
         ]
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
@@ -463,10 +643,8 @@ async def test_quality_gate_fails_after_retry(monkeypatch: pytest.MonkeyPatch, t
         side_effect=[
             (
                 {
-                    "docx_path": "output/resumes/resume_v1.docx",
-                    "changes_made": {},
+                    **_sample_resume_output(path="output/resumes/resume_v1.docx", ats_after=60),
                     "ats_score_before": 50,
-                    "ats_score_after": 60,
                     "evaluator_passed": False,
                     "evaluation_summary": "first fail",
                 },
@@ -475,22 +653,14 @@ async def test_quality_gate_fails_after_retry(monkeypatch: pytest.MonkeyPatch, t
             ),
             (
                 {
-                    "docx_path": "output/resumes/resume_v2.docx",
-                    "changes_made": {},
+                    **_sample_resume_output(path="output/resumes/resume_v2.docx", ats_after=61),
                     "ats_score_before": 60,
-                    "ats_score_after": 61,
                     "evaluator_passed": False,
                     "evaluation_summary": "retry fail",
                 },
                 uuid4(),
                 2,
             ),
-        ]
-    )
-    manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
-        side_effect=[
-            {"attachment_path": "output/resumes/resume_v1.docx", "status": "success"},
-            {"attachment_path": "output/resumes/resume_v2.docx", "status": "success"},
         ]
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
@@ -678,20 +848,10 @@ async def test_dry_run_mode_skips_routing(monkeypatch: pytest.MonkeyPatch, tmp_p
     manager._run_research = AsyncMock(return_value=_sample_research_output())  # type: ignore[method-assign]
     manager._run_resume_edit = AsyncMock(  # type: ignore[method-assign]
         return_value=(
-            {
-                "docx_path": "output/resumes/resume.docx",
-                "changes_made": {},
-                "ats_score_before": 55,
-                "ats_score_after": 75,
-                "evaluator_passed": True,
-                "evaluation_summary": "good",
-            },
+            _sample_resume_output(),
             uuid4(),
             1,
         )
-    )
-    manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
-        return_value={"attachment_path": "output/resumes/resume.docx", "status": "success"}
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
         return_value={
@@ -739,20 +899,10 @@ async def test_outbound_exception_persists_failed_outbox(
     manager._run_research = AsyncMock(return_value=_sample_research_output())  # type: ignore[method-assign]
     manager._run_resume_edit = AsyncMock(  # type: ignore[method-assign]
         return_value=(
-            {
-                "docx_path": "output/resumes/resume.docx",
-                "changes_made": {},
-                "ats_score_before": 55,
-                "ats_score_after": 75,
-                "evaluator_passed": True,
-                "evaluation_summary": "good",
-            },
+            _sample_resume_output(),
             uuid4(),
             1,
         )
-    )
-    manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
-        return_value={"attachment_path": "output/resumes/resume.docx", "status": "success"}
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
         return_value={
@@ -816,20 +966,10 @@ async def test_outbound_sent_false_marks_failure(
     manager._run_research = AsyncMock(return_value=_sample_research_output())  # type: ignore[method-assign]
     manager._run_resume_edit = AsyncMock(  # type: ignore[method-assign]
         return_value=(
-            {
-                "docx_path": "output/resumes/resume.docx",
-                "changes_made": {},
-                "ats_score_before": 55,
-                "ats_score_after": 75,
-                "evaluator_passed": True,
-                "evaluation_summary": "good",
-            },
+            _sample_resume_output(),
             uuid4(),
             1,
         )
-    )
-    manager._run_pdf_conversion = AsyncMock(  # type: ignore[method-assign]
-        return_value={"attachment_path": "output/resumes/resume.docx", "status": "success"}
     )
     manager._run_quality_gate = AsyncMock(  # type: ignore[method-assign]
         return_value={

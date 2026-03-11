@@ -148,25 +148,36 @@ def _set_required_runtime_env(
         monkeypatch.setenv(key, value)
 
 
-class _FailingWhatsAppAgent(StubWhatsAppMsgAgent):
-    async def run(self, context: dict, trace_id):  # noqa: ANN001
-        _ = (context, trace_id)
-        return {
-            "sent": False,
-            "channel": "whatsapp",
-            "recipient": str(context["poster_number"]),
-            "subject": None,
-            "body_preview": "WAHA send failed",
-            "attachment_path": context.get("attachment_path"),
-            "external_id": None,
-        }
+class _PolicyAwareWhatsAppAgent(StubWhatsAppMsgAgent):
+    async def run(self, context: dict, trace_id, delivery_mode: str = "send"):  # noqa: ANN001
+        if delivery_mode == "draft":
+            return {
+                "sent": False,
+                "channel": "whatsapp",
+                "recipient": str(context["poster_number"]),
+                "subject": None,
+                "body_preview": "Draft WhatsApp review body",
+                "attachment_path": context.get("attachment_path"),
+                "external_id": None,
+            }
+        if str(context.get("poster_number")) == "+15550001111":
+            return {
+                "sent": False,
+                "channel": "whatsapp",
+                "recipient": str(context["poster_number"]),
+                "subject": None,
+                "body_preview": "WAHA send failed",
+                "attachment_path": context.get("attachment_path"),
+                "external_id": None,
+            }
+        return await super().run(context=context, trace_id=trace_id, delivery_mode=delivery_mode)
 
 
 class _RoutingFactory(DefaultStubAgentFactory):
     def __init__(self, settings) -> None:  # noqa: ANN001
         super().__init__(settings=settings)
         self._gmail = StubGmailAgent()
-        self._whatsapp = _FailingWhatsAppAgent()
+        self._whatsapp = _PolicyAwareWhatsAppAgent()
 
 
 @pytest.mark.asyncio
@@ -188,15 +199,28 @@ async def test_outbound_routing_statuses(monkeypatch: pytest.MonkeyPatch, tmp_pa
     async def _fake_call_model(self, messages, trace_id, tools=None, max_tokens=2048):  # noqa: ANN001, ARG002
         content = str(messages[-1].get("content", "")).lower()
         if "evaluate whether this whatsapp message" in content:
-            with_email = "recruiter@example.com" in content
+            message_text = content.split("message_text:", 1)[-1]
+            with_email = "recruiter@example.com" in message_text or "reviewer@example.com" in message_text
+            decision = "okayish" if "okayish" in message_text else "fit"
+            score = 6 if decision == "okayish" else 8
+            email = None
+            poster_number = "+15550001111"
+            if "recruiter@example.com" in message_text:
+                email = "recruiter@example.com"
+            elif "reviewer@example.com" in message_text:
+                email = "reviewer@example.com"
+            if "no email" in message_text and decision == "okayish":
+                poster_number = "+15550002222"
             payload = {
                 "relevant": True,
-                "score": 8,
+                "decision": decision,
+                "decision_score": 0.5 if decision == "okayish" else 1.0,
+                "score": score,
                 "job_title": "ML Engineer",
                 "company": "Acme",
                 "job_summary": "Python and ML role",
-                "poster_email": "recruiter@example.com" if with_email else None,
-                "poster_number": "+15550001111",
+                "poster_email": email if with_email else None,
+                "poster_number": poster_number,
                 "discard_reason": None,
                 "relevance_reason": "Strong relevance",
             }
@@ -239,7 +263,9 @@ async def test_outbound_routing_statuses(monkeypatch: pytest.MonkeyPatch, tmp_pa
                         INSERT INTO whatsapp_messages (group_id, sender_number, message_text, message_hash)
                         VALUES
                           ('GROUP1@g.us', '+15550000001', 'Python ML role recruiter@example.com', 'wm_step9_hash_1'),
-                          ('GROUP1@g.us', '+15550000002', 'Python ML role no email', 'wm_step9_hash_2')
+                          ('GROUP1@g.us', '+15550000002', 'Python ML role no email', 'wm_step9_hash_2'),
+                          ('GROUP1@g.us', '+15550000003', 'Okayish cloud data role reviewer@example.com', 'wm_step9_hash_3'),
+                          ('GROUP1@g.us', '+15550000004', 'Okayish platform role no email', 'wm_step9_hash_4')
                         """
                     )
                 )
@@ -286,6 +312,8 @@ async def test_outbound_routing_statuses(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
         first = rows[0]
         second = rows[1]
+        third = rows[2]
+        fourth = rows[3]
         await pipeline_runner.run(
             message=type(
                 "Message",
@@ -313,6 +341,34 @@ async def test_outbound_routing_statuses(monkeypatch: pytest.MonkeyPatch, tmp_pa
                 )(),
                 trace_id=trace_rows[1][0],
             )
+        review_result = await pipeline_runner.run(
+            message=type(
+                "Message",
+                (),
+                {
+                    "id": third["id"],
+                    "group_id": third["group_id"],
+                    "sender_number": third["sender_number"],
+                    "message_text": third["message_text"],
+                },
+            )(),
+            trace_id=trace_rows[2][0],
+        )
+        assert review_result["action"] == "review_required"
+        review_whatsapp_result = await pipeline_runner.run(
+            message=type(
+                "Message",
+                (),
+                {
+                    "id": fourth["id"],
+                    "group_id": fourth["group_id"],
+                    "sender_number": fourth["sender_number"],
+                    "message_text": fourth["message_text"],
+                },
+            )(),
+            trace_id=trace_rows[3][0],
+        )
+        assert review_whatsapp_result["action"] == "review_required"
 
         sync_engine = create_engine(sync_test_url)
         try:
@@ -320,16 +376,20 @@ async def test_outbound_routing_statuses(monkeypatch: pytest.MonkeyPatch, tmp_pa
                 outbox_rows = conn.execute(
                     text("SELECT channel, status FROM outbox ORDER BY sent_at ASC")
                 ).all()
-                assert len(outbox_rows) == 2
+                assert len(outbox_rows) == 4
                 assert outbox_rows[0][0] == "email"
                 assert outbox_rows[0][1] == "sent"
                 assert outbox_rows[1][0] == "whatsapp"
                 assert outbox_rows[1][1] == "failed"
+                assert outbox_rows[2][0] == "email"
+                assert outbox_rows[2][1] == "review_required"
+                assert outbox_rows[3][0] == "whatsapp"
+                assert outbox_rows[3][1] == "review_required"
 
                 statuses = conn.execute(
                     text("SELECT status FROM pipeline_runs ORDER BY created_at ASC")
                 ).scalars().all()
-                assert statuses == ["sent", "failed"]
+                assert statuses == ["sent", "failed", "review_required", "review_required"]
         finally:
             sync_engine.dispose()
     finally:

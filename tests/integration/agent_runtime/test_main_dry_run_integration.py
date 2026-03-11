@@ -93,8 +93,6 @@ def _set_required_runtime_env(
     resume_tracks_dir.mkdir(parents=True, exist_ok=True)
     resume_docx_tracks_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "resumes").mkdir(parents=True, exist_ok=True)
-    (output_dir / "pdfs").mkdir(parents=True, exist_ok=True)
-
     base_docx = data_dir / "base_resume.docx"
     doc = Document()
     doc.add_heading("Summary", level=1)
@@ -209,8 +207,14 @@ async def test_dry_run_rolls_back_transient_rows(
             with db_engine.connect() as conn:
                 message_count = conn.execute(text("SELECT count(*) FROM whatsapp_messages")).scalar_one()
                 pipeline_count = conn.execute(text("SELECT count(*) FROM pipeline_runs")).scalar_one()
+                resume_count = conn.execute(text("SELECT count(*) FROM resume_versions")).scalar_one()
+                outbox_count = conn.execute(text("SELECT count(*) FROM outbox")).scalar_one()
+                trace_count = conn.execute(text("SELECT count(*) FROM agent_traces")).scalar_one()
                 assert message_count == 0
                 assert pipeline_count == 0
+                assert resume_count == 0
+                assert outbox_count == 0
+                assert trace_count == 0
         finally:
             db_engine.dispose()
     finally:

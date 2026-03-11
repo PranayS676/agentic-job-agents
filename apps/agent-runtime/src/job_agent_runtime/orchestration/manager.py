@@ -226,20 +226,55 @@ class ManagerAgent(BaseAgent):
 
             stage = "routing"
             routing_context = await self._load_routing_context(trace_id=trace_id)
+            routing_context["relevance_decision"] = decision_label
+            delivery_mode = self._select_delivery_mode(routing_context)
             try:
                 outbound_result = await self._run_routing(
                     trace_id=trace_id,
                     context=routing_context,
+                    delivery_mode=delivery_mode,
                 )
             except Exception as exc:
                 failed_outbound = self._build_failed_outbound_result(
                     context=routing_context,
                     error_message=f"{exc.__class__.__name__}: {exc}",
                 )
-                await self._persist_outbound_result(trace_id=trace_id, outbound_result=failed_outbound)
+                await self._persist_outbound_result(
+                    trace_id=trace_id,
+                    outbound_result=failed_outbound,
+                    outbox_status="failed",
+                )
                 raise
 
-            await self._persist_outbound_result(trace_id=trace_id, outbound_result=outbound_result)
+            outbox_status = self._resolve_outbox_status(
+                outbound_result=outbound_result,
+                delivery_mode=delivery_mode,
+            )
+            await self._persist_outbound_result(
+                trace_id=trace_id,
+                outbound_result=outbound_result,
+                outbox_status=outbox_status,
+            )
+
+            if outbox_status == "review_required":
+                await self.tracer.update_pipeline_status(
+                    trace_id=trace_id,
+                    status="review_required",
+                    stage_data={
+                        "channel": outbound_result["channel"],
+                        "recipient": outbound_result["recipient"],
+                        "delivery_mode": delivery_mode,
+                    },
+                )
+                return {
+                    "trace_id": str(trace_id),
+                    "action": "review_required",
+                    "channel": outbound_result["channel"],
+                    "recipient": outbound_result["recipient"],
+                    "job_title": relevance["job_title"],
+                    "company": relevance["company"],
+                    "quality_gate": quality_decision,
+                }
 
             if not outbound_result["sent"]:
                 raise RuntimeError(
@@ -388,17 +423,30 @@ class ManagerAgent(BaseAgent):
             "ats_score_after": ats_after,
         }
 
-    async def _run_routing(self, trace_id: UUID, context: dict[str, Any]) -> OutboundResult:
+    async def _run_routing(
+        self,
+        trace_id: UUID,
+        context: dict[str, Any],
+        delivery_mode: Literal["send", "draft"] = "send",
+    ) -> OutboundResult:
         if context.get("poster_email"):
             outbound_agent = self.agent_factory.create_gmail_agent()
-            return await outbound_agent.run(context=context, trace_id=trace_id)
+            return await outbound_agent.run(
+                context=context,
+                trace_id=trace_id,
+                delivery_mode=delivery_mode,
+            )
 
         poster_number = str(context.get("poster_number") or "").strip()
         if not poster_number:
             raise ValueError("poster_number is required when poster_email is missing")
 
         outbound_agent = self.agent_factory.create_whatsapp_agent()
-        return await outbound_agent.run(context=context, trace_id=trace_id)
+        return await outbound_agent.run(
+            context=context,
+            trace_id=trace_id,
+            delivery_mode=delivery_mode,
+        )
 
     async def _mark_failure(self, trace_id: UUID, stage: str, error_message: str) -> None:
         update_stmt = text(
@@ -569,7 +617,13 @@ class ManagerAgent(BaseAgent):
             raise ValueError(f"Unable to load routing context for trace_id={trace_id}")
         return dict(row)
 
-    async def _persist_outbound_result(self, trace_id: UUID, outbound_result: OutboundResult) -> None:
+    async def _persist_outbound_result(
+        self,
+        trace_id: UUID,
+        outbound_result: OutboundResult,
+        *,
+        outbox_status: str | None = None,
+    ) -> None:
         update_stmt = text(
             """
             UPDATE pipeline_runs
@@ -620,7 +674,7 @@ class ManagerAgent(BaseAgent):
                 "body_preview": outbound_result["body_preview"][:200],
                 "attachment_path": outbound_result["attachment_path"],
                 "external_id": outbound_result["external_id"],
-                "status": "sent" if outbound_result["sent"] else "failed",
+                "status": outbox_status or ("sent" if outbound_result["sent"] else "failed"),
             },
         )
         await self.db_session.flush()
@@ -719,6 +773,19 @@ class ManagerAgent(BaseAgent):
             "attachment_path": str(context.get("attachment_path") or "").strip() or None,
             "external_id": None,
         }
+
+    def _select_delivery_mode(self, context: dict[str, Any]) -> Literal["send", "draft"]:
+        return "draft" if str(context.get("relevance_decision") or "").strip().lower() == "okayish" else "send"
+
+    def _resolve_outbox_status(
+        self,
+        *,
+        outbound_result: OutboundResult,
+        delivery_mode: Literal["send", "draft"],
+    ) -> str:
+        if delivery_mode == "draft":
+            return "review_required"
+        return "sent" if outbound_result["sent"] else "failed"
 
     def _resume_attachment_path(self, resume_output: ResumeEditOutput | dict[str, Any]) -> str:
         attachment_path = str(

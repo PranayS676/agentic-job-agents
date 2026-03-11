@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import os
@@ -9,17 +10,14 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import clear_mappers
 
 from job_agent_runtime.agents.base_agent import BaseAgent
-from job_agent_runtime.agents.stub_agents import (
-    DefaultStubAgentFactory,
-    StubGmailAgent,
-    StubWhatsAppMsgAgent,
-)
+from job_agent_runtime.agents.stub_agents import DefaultStubAgentFactory, StubWhatsAppMsgAgent
 from job_platform.config import clear_settings_cache, get_settings
 
 
@@ -53,7 +51,7 @@ def _ensure_database_exists(sync_test_url: str) -> None:
             if not exists:
                 conn.execute(text(f'CREATE DATABASE "{database_name}"'))
     except Exception as exc:  # pragma: no cover - environment dependent
-        pytest.skip(f"PostgreSQL not available for integration tests: {exc}")
+        pytest.skip(f"PostgreSQL not available for Step 8 integration tests: {exc}")
     finally:
         admin_engine.dispose()
 
@@ -192,13 +190,13 @@ class _PolicyAwareWhatsAppAgent(StubWhatsAppMsgAgent):
 class _PolicyAwareRoutingFactory(DefaultStubAgentFactory):
     def __init__(self, settings) -> None:  # noqa: ANN001
         super().__init__(settings=settings)
-        self._gmail = StubGmailAgent()
         self._whatsapp = _PolicyAwareWhatsAppAgent()
 
 
 @pytest.mark.asyncio
-async def test_watcher_manager_terminal_states_and_cleanup(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+async def test_backend_ingest_then_agent_runtime_drain_matches_ops_api(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     async_test_url = os.getenv("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
     sync_test_url = _async_to_sync_url(async_test_url)
@@ -209,16 +207,17 @@ async def test_watcher_manager_terminal_states_and_cleanup(
 
     clear_settings_cache()
     _run_alembic("upgrade")
-    upgraded = True
 
     clear_mappers()
-    import job_agent_runtime.orchestration.manager as manager_module
     import job_platform.database as database_module
     import job_platform.models as models_module
+    import job_backend.services.ingest as ingest_module
+    import job_agent_runtime.orchestration.manager as manager_module
     import job_agent_runtime.worker.watcher as watcher_module
 
     importlib.reload(database_module)
     importlib.reload(models_module)
+    importlib.reload(ingest_module)
     importlib.reload(manager_module)
     importlib.reload(watcher_module)
 
@@ -298,20 +297,6 @@ async def test_watcher_manager_terminal_states_and_cleanup(
                     "discard_reason": None,
                     "relevance_reason": "Strong relevance",
                 }
-            elif "fit email retry" in content:
-                payload = {
-                    "decision": "fit",
-                    "decision_score": 1.0,
-                    "relevant": True,
-                    "score": 8,
-                    "job_title": "ML Engineer",
-                    "company": "Acme",
-                    "job_summary": "Fit email retry recruiter_retry@example.com",
-                    "poster_email": "recruiter_retry@example.com",
-                    "poster_number": "+15550005555",
-                    "discard_reason": None,
-                    "relevance_reason": "Strong relevance",
-                }
             else:
                 payload = {
                     "decision": "fit",
@@ -338,13 +323,7 @@ async def test_watcher_manager_terminal_states_and_cleanup(
                         "priority": 1,
                     }
                 ],
-                "remove_items": [
-                    {
-                        "section": "skills",
-                        "action": "Trim unrelated legacy bullets",
-                        "reason": "Improve relevance density",
-                    }
-                ],
+                "remove_items": [],
                 "keywords_to_inject": ["Python", "FastAPI", "LLM"],
                 "sections_to_edit": ["summary", "skills", "experience_recent_role"],
                 "ats_score_estimate_before": 55,
@@ -361,267 +340,161 @@ async def test_watcher_manager_terminal_states_and_cleanup(
             }
             return {"text": json.dumps(payload), "input_tokens": 30, "output_tokens": 40, "latency_ms": 5}
 
+        if "quality-gate this resume iteration" in content:
+            return {"text": json.dumps({"pass": True, "reason": "pass", "feedback": ""})}
+
         return {"text": "{}"}
 
-    async def _fake_quality_gate(self, trace_id, resume_output, attempt):  # noqa: ANN001
-        row = (
-            await self.db_session.execute(
-                text(
-                    """
-                    SELECT wm.message_text
-                    FROM pipeline_runs pr
-                    JOIN whatsapp_messages wm ON wm.id = pr.message_id
-                    WHERE pr.trace_id = :trace_id
-                    """
-                ),
-                {"trace_id": trace_id},
-            )
-        ).scalar_one()
-        message_text = str(row).lower()
-        if "fit email retry" in message_text and attempt == 0:
-            return {
-                "passed": False,
-                "model_pass": False,
-                "criteria_pass": False,
-                "feedback": "Need stronger impact bullets",
-                "reason": "first pass failed",
-                "evaluator_passed": False,
-                "ats_score_after": int(resume_output["ats_score_after"]),
-            }
-        return {
-            "passed": True,
-            "model_pass": True,
-            "criteria_pass": True,
-            "feedback": "",
-            "reason": "pass",
-            "evaluator_passed": True,
-            "ats_score_after": int(resume_output["ats_score_after"]),
-        }
-
     monkeypatch.setattr(BaseAgent, "_call_model", _fake_call_model)
-    monkeypatch.setattr(manager_module.ManagerAgent, "_run_quality_gate", _fake_quality_gate)
+
+    backend_app = ingest_module.create_app(enable_polling=False)
+    payloads = [
+        {
+            "group_id": "GROUP1@g.us",
+            "sender_number": "+15550000001",
+            "message_text": "FIT EMAIL recruiter@example.com",
+            "timestamp": 1710000001,
+            "external_message_id": "system-fit-email",
+        },
+        {
+            "group_id": "GROUP1@g.us",
+            "sender_number": "+15550000002",
+            "message_text": "FIT WHATSAPP no email",
+            "timestamp": 1710000002,
+            "external_message_id": "system-fit-whatsapp",
+        },
+        {
+            "group_id": "GROUP1@g.us",
+            "sender_number": "+15550000003",
+            "message_text": "OKAYISH EMAIL reviewer@example.com",
+            "timestamp": 1710000003,
+            "external_message_id": "system-okayish-email",
+        },
+        {
+            "group_id": "GROUP1@g.us",
+            "sender_number": "+15550000004",
+            "message_text": "OKAYISH WHATSAPP no email",
+            "timestamp": 1710000004,
+            "external_message_id": "system-okayish-whatsapp",
+        },
+        {
+            "group_id": "GROUP1@g.us",
+            "sender_number": "+15550000005",
+            "message_text": "DISCARD MARKETING role",
+            "timestamp": 1710000005,
+            "external_message_id": "system-discard",
+        },
+        {
+            "group_id": "GROUP1@g.us",
+            "sender_number": "+15550000006",
+            "message_text": "FIT WHATSAPP FAIL no email",
+            "timestamp": 1710000006,
+            "external_message_id": "system-fail",
+        },
+    ]
 
     try:
-        sync_engine = create_engine(sync_test_url)
-        try:
-            with sync_engine.begin() as conn:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO whatsapp_messages (group_id, sender_number, message_text, message_hash)
-                        VALUES
-                          ('GROUP1@g.us', '+15550000001', 'FIT EMAIL recruiter@example.com', 'wm_step7_hash_1'),
-                          ('GROUP1@g.us', '+15550000002', 'FIT WHATSAPP no email', 'wm_step7_hash_2'),
-                          ('GROUP1@g.us', '+15550000003', 'OKAYISH EMAIL reviewer@example.com', 'wm_step7_hash_3'),
-                          ('GROUP1@g.us', '+15550000004', 'OKAYISH WHATSAPP no email', 'wm_step7_hash_4'),
-                          ('GROUP1@g.us', '+15550000005', 'DISCARD MARKETING role', 'wm_step7_hash_5'),
-                          ('GROUP1@g.us', '+15550000006', 'FIT EMAIL RETRY recruiter_retry@example.com', 'wm_step7_hash_6'),
-                          ('GROUP1@g.us', '+15550000007', 'FIT WHATSAPP FAIL no email', 'wm_step7_hash_7')
-                        """
-                    )
-                )
-        finally:
-            sync_engine.dispose()
+        with TestClient(backend_app) as client:
+            for payload in payloads:
+                response = client.post("/webhook/waha", json=payload)
+                assert response.status_code == 200
+                assert response.json()["status"] == "processed"
 
-        settings = get_settings()
-        pipeline_runner = manager_module.ManagerPipelineRunner(
-            session_factory=session_factory,
-            settings=settings,
-            agent_factory=_PolicyAwareRoutingFactory(settings=settings),
-        )
-        watcher = watcher_module.WatcherService(settings=settings, session_factory=session_factory)
+            overview_before = client.get("/api/ops/overview")
+            assert overview_before.status_code == 200
+            assert overview_before.json()["unprocessed_messages_count"] == 6
+            assert overview_before.json()["sent_pipeline_count_24h"] == 0
+            assert overview_before.json()["review_required_count"] == 0
 
-        summary = await watcher.run_tick(pipeline_runner=pipeline_runner)
-        assert summary["processed_count"] == 6
-        assert summary["error_count"] == 1
+            settings = get_settings()
+            pipeline_runner = manager_module.ManagerPipelineRunner(
+                session_factory=session_factory,
+                settings=settings,
+                agent_factory=_PolicyAwareRoutingFactory(settings=settings),
+            )
+            watcher = watcher_module.WatcherService(settings=settings, session_factory=session_factory)
+            summary = await watcher.run_tick(pipeline_runner=pipeline_runner)
 
-        sync_engine = create_engine(sync_test_url)
-        try:
-            with sync_engine.connect() as conn:
-                processed_rows = conn.execute(
-                    text(
-                        """
-                        SELECT message_text, processed, processing_error
-                        FROM whatsapp_messages
-                        ORDER BY created_at ASC
-                        """
-                    )
-                ).all()
-                assert len(processed_rows) == 7
-                assert all(row[1] is True for row in processed_rows)
+            assert summary["processed_count"] == 5
+            assert summary["error_count"] == 1
 
-                processing_errors = {row[0]: row[2] for row in processed_rows}
-                assert processing_errors["FIT WHATSAPP FAIL no email"]
-                assert "Outbound send failed" in processing_errors["FIT WHATSAPP FAIL no email"]
-                assert processing_errors["OKAYISH EMAIL reviewer@example.com"] is None
-                assert processing_errors["OKAYISH WHATSAPP no email"] is None
-                assert processing_errors["DISCARD MARKETING role"] is None
+            overview_after = client.get("/api/ops/overview")
+            assert overview_after.status_code == 200
+            overview_payload = overview_after.json()
+            assert overview_payload["unprocessed_messages_count"] == 0
+            assert overview_payload["sent_pipeline_count_24h"] == 2
+            assert overview_payload["review_required_count"] == 2
+            assert overview_payload["review_required_count_24h"] == 2
+            assert overview_payload["discarded_pipeline_count_24h"] == 1
+            assert overview_payload["failed_pipeline_count"] == 1
+            assert overview_payload["failed_count_24h"] == 1
 
-                pipeline_rows = conn.execute(
-                    text(
-                        """
-                        SELECT wm.message_text, pr.status, pr.error_stage, pr.manager_decision, pr.research_output
-                        FROM pipeline_runs pr
-                        JOIN whatsapp_messages wm ON wm.id = pr.message_id
-                        ORDER BY wm.created_at ASC
-                        """
-                    )
-                ).all()
-                assert len(pipeline_rows) == 7
+            review_queue = client.get("/api/ops/review-queue", params={"limit": 10})
+            assert review_queue.status_code == 200
+            review_rows = review_queue.json()
+            assert len(review_rows) == 2
+            assert {row["channel"] for row in review_rows} == {"email", "whatsapp"}
+            assert all(row["status"] == "review_required" for row in review_rows)
+            assert all(str(row["attachment_path"]).endswith(".docx") for row in review_rows)
 
-                expected_statuses = {
-                    "FIT EMAIL recruiter@example.com": "sent",
-                    "FIT WHATSAPP no email": "sent",
-                    "OKAYISH EMAIL reviewer@example.com": "review_required",
-                    "OKAYISH WHATSAPP no email": "review_required",
-                    "DISCARD MARKETING role": "discarded",
-                    "FIT EMAIL RETRY recruiter_retry@example.com": "sent",
-                    "FIT WHATSAPP FAIL no email": "failed",
-                }
-                expected_error_stages = {
-                    "FIT WHATSAPP FAIL no email": "routing",
-                }
-                expected_sequences = {
-                    "FIT EMAIL recruiter@example.com": [
-                        "relevance_done",
-                        "research_done",
-                        "resume_ready",
-                        "sent",
-                    ],
-                    "FIT WHATSAPP no email": [
-                        "relevance_done",
-                        "research_done",
-                        "resume_ready",
-                        "sent",
-                    ],
-                    "OKAYISH EMAIL reviewer@example.com": [
-                        "relevance_done",
-                        "research_done",
-                        "resume_ready",
-                        "review_required",
-                    ],
-                    "OKAYISH WHATSAPP no email": [
-                        "relevance_done",
-                        "research_done",
-                        "resume_ready",
-                        "review_required",
-                    ],
-                    "DISCARD MARKETING role": [
-                        "relevance_done",
-                        "discarded",
-                    ],
-                    "FIT EMAIL RETRY recruiter_retry@example.com": [
-                        "relevance_done",
-                        "research_done",
-                        "resume_ready",
-                        "quality_retry",
-                        "resume_ready",
-                        "sent",
-                    ],
-                    "FIT WHATSAPP FAIL no email": [
-                        "relevance_done",
-                        "research_done",
-                        "resume_ready",
-                        "failed",
-                    ],
-                }
+            pipeline_runs = client.get("/api/ops/pipeline-runs", params={"limit": 20})
+            assert pipeline_runs.status_code == 200
+            pipeline_rows = pipeline_runs.json()
+            assert len(pipeline_rows) == 6
+            assert {row["status"] for row in pipeline_rows} == {
+                "sent",
+                "review_required",
+                "discarded",
+                "failed",
+            }
 
-                for message_text, status, error_stage, manager_decision, research_output in pipeline_rows:
-                    assert status == expected_statuses[message_text]
-                    assert error_stage == expected_error_stages.get(message_text)
-                    events = list((manager_decision or {}).get("events") or [])
-                    assert [event["status"] for event in events] == expected_sequences[message_text]
-                    if status == "discarded":
-                        assert research_output is None
-                    else:
-                        assert isinstance(research_output, dict)
-                        assert research_output["selected_resume_track"] == "resume_track_python_ml"
-                        assert research_output["experience_target_section"] == "experience_recent_role"
-
-                resume_rows = conn.execute(
-                    text(
-                        """
-                        SELECT wm.message_text, rv.version_number, rv.attachment_path
-                        FROM resume_versions rv
-                        JOIN pipeline_runs pr ON pr.trace_id = rv.trace_id
-                        JOIN whatsapp_messages wm ON wm.id = pr.message_id
-                        ORDER BY wm.created_at ASC, rv.version_number ASC
-                        """
-                    )
-                ).all()
-                assert len(resume_rows) == 7
-                retry_versions = [
-                    row[1] for row in resume_rows if row[0] == "FIT EMAIL RETRY recruiter_retry@example.com"
-                ]
-                assert retry_versions == [1, 2]
-                assert all(row[2] for row in resume_rows)
-
-                outbox_rows = conn.execute(
-                    text(
-                        """
-                        SELECT wm.message_text, o.channel, o.status, o.attachment_path
-                        FROM outbox o
-                        JOIN pipeline_runs pr ON pr.trace_id = o.trace_id
-                        JOIN whatsapp_messages wm ON wm.id = pr.message_id
-                        ORDER BY wm.created_at ASC, o.sent_at ASC
-                        """
-                    )
-                ).all()
-                assert len(outbox_rows) == 6
-                expected_outbox = {
-                    "FIT EMAIL recruiter@example.com": ("email", "sent"),
-                    "FIT WHATSAPP no email": ("whatsapp", "sent"),
-                    "OKAYISH EMAIL reviewer@example.com": ("email", "review_required"),
-                    "OKAYISH WHATSAPP no email": ("whatsapp", "review_required"),
-                    "FIT EMAIL RETRY recruiter_retry@example.com": ("email", "sent"),
-                    "FIT WHATSAPP FAIL no email": ("whatsapp", "failed"),
-                }
-                for message_text, channel, outbox_status, attachment_path in outbox_rows:
-                    assert (channel, outbox_status) == expected_outbox[message_text]
-                    assert attachment_path
-
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO whatsapp_messages (
-                            group_id, sender_number, message_text, message_hash, processed, created_at
+            sync_engine = create_engine(sync_test_url)
+            try:
+                with sync_engine.connect() as conn:
+                    processed_rows = conn.execute(
+                        text(
+                            """
+                            SELECT message_text, processed, processing_error
+                            FROM whatsapp_messages
+                            ORDER BY source_timestamp ASC
+                            """
                         )
-                        VALUES (
-                            'GROUP1@g.us',
-                            '+15550000099',
-                            'old message',
-                            'wm_step7_old_hash',
-                            true,
-                            NOW() - INTERVAL '31 days'
+                    ).all()
+                    assert len(processed_rows) == 6
+                    assert all(row[1] is True for row in processed_rows)
+                    error_map = {row[0]: row[2] for row in processed_rows}
+                    assert error_map["FIT WHATSAPP FAIL no email"]
+                    assert "Outbound send failed" in error_map["FIT WHATSAPP FAIL no email"]
+                    assert error_map["OKAYISH EMAIL reviewer@example.com"] is None
+                    assert error_map["OKAYISH WHATSAPP no email"] is None
+
+                    status_rows = conn.execute(
+                        text(
+                            """
+                            SELECT wm.message_text, pr.status
+                            FROM pipeline_runs pr
+                            JOIN whatsapp_messages wm ON wm.id = pr.message_id
+                            ORDER BY wm.source_timestamp ASC
+                            """
                         )
-                        """
-                    )
-                )
-                conn.commit()
-        finally:
-            sync_engine.dispose()
+                    ).all()
+                    assert dict(status_rows) == {
+                        "FIT EMAIL recruiter@example.com": "sent",
+                        "FIT WHATSAPP no email": "sent",
+                        "OKAYISH EMAIL reviewer@example.com": "review_required",
+                        "OKAYISH WHATSAPP no email": "review_required",
+                        "DISCARD MARKETING role": "discarded",
+                        "FIT WHATSAPP FAIL no email": "failed",
+                    }
 
-        deleted = await watcher.run_cleanup_once()
-        assert deleted >= 1
+            finally:
+                sync_engine.dispose()
 
-        sync_engine = create_engine(sync_test_url)
-        try:
-            with sync_engine.connect() as conn:
-                remaining = conn.execute(
-                    text(
-                        """
-                        SELECT count(*)
-                        FROM whatsapp_messages
-                        WHERE message_hash = 'wm_step7_old_hash'
-                        """
-                    )
-                ).scalar_one()
-                assert remaining == 0
-        finally:
-            sync_engine.dispose()
+            second_tick = await watcher.run_tick(pipeline_runner=pipeline_runner)
+            assert second_tick["processed_count"] == 0
+            assert second_tick["error_count"] == 0
     finally:
         clear_mappers()
         await async_engine.dispose()
         clear_settings_cache()
-        if upgraded:
-            _run_alembic("downgrade")
+        _run_alembic("downgrade")
