@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import base64
+import json
 from pathlib import Path
 
 import httpx
@@ -141,9 +143,14 @@ async def test_send_message_with_file_success_path(tmp_path: Path) -> None:
 
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/sendFile"
-        body = await request.aread()
-        assert b'filename="resume.pdf"' in body
-        assert b'name="caption"' in body
+        assert request.headers["content-type"].startswith("application/json")
+        body = json.loads((await request.aread()).decode("utf-8"))
+        assert body["chatId"] == "15550001111@c.us"
+        assert body["session"] == "default"
+        assert body["caption"] == "Please review attached resume"
+        assert body["file"]["filename"] == "resume.pdf"
+        assert body["file"]["mimetype"] == "application/pdf"
+        assert base64.b64decode(body["file"]["data"]) == attachment.read_bytes()
         return httpx.Response(200, json={"id": "file-1"})
 
     connector = _build_connector(handler)
@@ -155,6 +162,34 @@ async def test_send_message_with_file_success_path(tmp_path: Path) -> None:
         )
         assert result["ok"] is True
         assert result["data"]["id"] == "file-1"
+    finally:
+        await connector.close()
+
+
+@pytest.mark.asyncio
+async def test_send_message_with_file_includes_http_error_body(tmp_path: Path) -> None:
+    attachment = tmp_path / "resume.docx"
+    attachment.write_text("resume", encoding="utf-8")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={
+                "message": "The feature is available only in Plus version for 'WEBJS' engine.",
+                "statusCode": 422,
+            },
+        )
+
+    connector = _build_connector(handler)
+    try:
+        result = await connector.send_message_with_file(
+            to_number="15550001111",
+            text="Please review attached resume",
+            file_path=str(attachment),
+        )
+        assert result["ok"] is False
+        assert "Plus version" in str(result["error"])
+        assert "422" in str(result["error"])
     finally:
         await connector.close()
 

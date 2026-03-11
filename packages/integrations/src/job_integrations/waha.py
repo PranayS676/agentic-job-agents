@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import base64
 import mimetypes
 import re
 from pathlib import Path
@@ -52,6 +53,19 @@ class WAHAConnector:
             data = response.json() if response.content else {}
             self.last_error = None
             return {"ok": True, "data": data}
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text.strip() if exc.response is not None else ""
+            error = str(exc)
+            if detail:
+                error = f"{error} body={detail[:1000]}"
+            self.last_error = error
+            self.logger.error(
+                "waha_request_failed",
+                method=method,
+                path=path,
+                error=error,
+            )
+            return {"ok": False, "error": error}
         except Exception as exc:  # noqa: BLE001
             self.last_error = str(exc)
             self.logger.error(
@@ -134,15 +148,17 @@ class WAHAConnector:
             return {"ok": False, "error": f"file not found: {file_path}"}
 
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        data = {
+        payload = {
             "chatId": self._normalize_chat_id(to_number),
             "session": self.session,
             "caption": text,
+            "file": {
+                "mimetype": content_type,
+                "filename": path.name,
+                "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+            },
         }
-
-        with path.open("rb") as file_stream:
-            files = {"file": (path.name, file_stream, content_type)}
-            response = await self._request_json("POST", "/api/sendFile", data=data, files=files)
+        response = await self._request_json("POST", "/api/sendFile", json=payload)
 
         if response.get("ok"):
             payload = response.get("data")
