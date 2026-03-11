@@ -68,7 +68,6 @@ def _print_readiness_table(*, settings, db_status: str, waha_status: str, gmail_
     table.add_row("Manager model", str(settings.manager_model))
     table.add_row("Research model", str(settings.research_model))
     table.add_row("Resume editor model", str(settings.resume_editor_model))
-    table.add_row("PDF converter model", str(settings.pdf_converter_model))
     table.add_row("Gmail model", str(settings.gmail_agent_model))
     table.add_row("WhatsApp model", str(settings.whatsapp_msg_model))
     table.add_row("DB", db_status)
@@ -81,7 +80,7 @@ def _print_readiness_table(*, settings, db_status: str, waha_status: str, gmail_
 def _snapshot_artifacts(settings) -> set[Path]:
     files: set[Path] = set()
     output_dir = settings.resolve_path(settings.output_dir)
-    for subdir in ("resumes", "pdfs"):
+    for subdir in ("resumes",):
         target = output_dir / subdir
         if not target.is_dir():
             continue

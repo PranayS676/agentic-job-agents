@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from shutil import which
 from typing import Literal
 
 from pydantic import SecretStr, field_validator
@@ -21,11 +20,12 @@ class Settings(BaseSettings):
     )
 
     anthropic_api_key: SecretStr | None = None
+    anthropic_auth_token: SecretStr | None = None
+    anthropic_base_url: str | None = None
 
     manager_model: str | None = None
     research_model: str | None = None
     resume_editor_model: str | None = None
-    pdf_converter_model: str | None = None
     gmail_agent_model: str | None = None
     whatsapp_msg_model: str | None = None
 
@@ -48,6 +48,9 @@ class Settings(BaseSettings):
 
     base_resume_docx: Path | None = None
     base_resume_text: Path | None = None
+    resume_library_dir: Path | None = None
+    resume_tracks_dir: Path | None = None
+    resume_docx_tracks_dir: Path | None = None
     output_dir: Path | None = None
     skills_dir: Path | None = None
 
@@ -61,6 +64,25 @@ class Settings(BaseSettings):
         if value < 1:
             raise ValueError("poll_interval_seconds must be >= 1")
         return value
+
+    @field_validator("anthropic_api_key", "anthropic_auth_token", mode="before")
+    @classmethod
+    def normalize_optional_secret(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, SecretStr):
+            cleaned = value.get_secret_value().strip()
+            return SecretStr(cleaned) if cleaned else None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+    @field_validator("anthropic_base_url", mode="before")
+    @classmethod
+    def normalize_optional_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
 
     @field_validator("min_relevance_score")
     @classmethod
@@ -161,13 +183,14 @@ def validate_backend_startup_requirements(settings: Settings) -> None:
 def validate_agent_runtime_startup_requirements(settings: Settings) -> None:
     missing: list[str] = []
 
-    if settings.anthropic_api_key is None:
-        missing.append("Missing required setting: ANTHROPIC_API_KEY")
+    if settings.anthropic_api_key is None and settings.anthropic_auth_token is None:
+        missing.append(
+            "Missing required setting: provide ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN"
+        )
     for field_name in (
         "manager_model",
         "research_model",
         "resume_editor_model",
-        "pdf_converter_model",
         "gmail_agent_model",
         "whatsapp_msg_model",
         "sender_email",
@@ -200,14 +223,38 @@ def validate_agent_runtime_startup_requirements(settings: Settings) -> None:
     elif not settings.resolve_path(settings.base_resume_text).is_file():
         missing.append(f"Missing required file: {settings.resolve_path(settings.base_resume_text)}")
 
+    if settings.resume_library_dir is None:
+        missing.append("Missing required setting: RESUME_LIBRARY_DIR")
+    elif not settings.resolve_path(settings.resume_library_dir).is_dir():
+        missing.append(f"Missing required directory: {settings.resolve_path(settings.resume_library_dir)}")
+
+    if settings.resume_tracks_dir is None:
+        missing.append("Missing required setting: RESUME_TRACKS_DIR")
+    else:
+        resume_tracks_dir = settings.resolve_path(settings.resume_tracks_dir)
+        if not resume_tracks_dir.is_dir():
+            missing.append(f"Missing required directory: {resume_tracks_dir}")
+        elif len(list(resume_tracks_dir.glob('*.json'))) < 3:
+            missing.append(
+                f"Missing required resume track files: expected at least 3 JSON tracks in {resume_tracks_dir}"
+            )
+
+    if settings.resume_docx_tracks_dir is None:
+        missing.append("Missing required setting: RESUME_DOCX_TRACKS_DIR")
+    else:
+        resume_docx_tracks_dir = settings.resolve_path(settings.resume_docx_tracks_dir)
+        if not resume_docx_tracks_dir.is_dir():
+            missing.append(f"Missing required directory: {resume_docx_tracks_dir}")
+        elif len(list(resume_docx_tracks_dir.glob("*.docx"))) < 3:
+            missing.append(
+                "Missing required resume DOCX track files: "
+                f"expected at least 3 DOCX tracks in {resume_docx_tracks_dir}"
+            )
+
     if settings.gmail_credentials_path is None:
         missing.append("Missing required setting: GMAIL_CREDENTIALS_PATH")
     elif not settings.resolve_path(settings.gmail_credentials_path).is_file():
         missing.append(f"Missing required file: {settings.resolve_path(settings.gmail_credentials_path)}")
-
-    if which("libreoffice") is None and which("soffice") is None:
-        missing.append("Missing required binary: libreoffice or soffice must be on PATH")
-
     if missing:
         details = "\n".join(f"- {entry}" for entry in missing)
         raise RuntimeError(f"Agent runtime startup requirements validation failed:\n{details}")

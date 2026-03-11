@@ -9,16 +9,18 @@ from job_platform.config import (
     Settings,
     clear_settings_cache,
     get_settings,
+    validate_agent_runtime_startup_requirements,
     validate_startup_requirements,
 )
 
 
 ENV_KEYS = [
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
     "MANAGER_MODEL",
     "RESEARCH_MODEL",
     "RESUME_EDITOR_MODEL",
-    "PDF_CONVERTER_MODEL",
     "GMAIL_AGENT_MODEL",
     "WHATSAPP_MSG_MODEL",
     "DATABASE_URL",
@@ -36,6 +38,9 @@ ENV_KEYS = [
     "MAX_RESUME_EDIT_ITERATIONS",
     "BASE_RESUME_DOCX",
     "BASE_RESUME_TEXT",
+    "RESUME_LIBRARY_DIR",
+    "RESUME_TRACKS_DIR",
+    "RESUME_DOCX_TRACKS_DIR",
     "OUTPUT_DIR",
     "SKILLS_DIR",
     "LOG_LEVEL",
@@ -49,7 +54,6 @@ DEFAULT_ENV = {
     "MANAGER_MODEL": "claude-opus-4-6",
     "RESEARCH_MODEL": "claude-sonnet-4-6",
     "RESUME_EDITOR_MODEL": "claude-sonnet-4-6",
-    "PDF_CONVERTER_MODEL": "claude-haiku-4-5-20251001",
     "GMAIL_AGENT_MODEL": "claude-sonnet-4-6",
     "WHATSAPP_MSG_MODEL": "claude-sonnet-4-6",
     "DATABASE_URL": "postgresql+asyncpg://postgres:password@localhost:5432/jobagent",
@@ -67,6 +71,9 @@ DEFAULT_ENV = {
     "MAX_RESUME_EDIT_ITERATIONS": "2",
     "BASE_RESUME_DOCX": "data/base_resume.docx",
     "BASE_RESUME_TEXT": "data/base_resume.md",
+    "RESUME_LIBRARY_DIR": "data/resume-library",
+    "RESUME_TRACKS_DIR": "data/resume-tracks",
+    "RESUME_DOCX_TRACKS_DIR": "data/resume-docx-tracks",
     "OUTPUT_DIR": "output",
     "SKILLS_DIR": "apps/agent-runtime/skills",
     "LOG_LEVEL": "INFO",
@@ -296,6 +303,92 @@ def test_missing_gmail_token_file_does_not_fail_startup_validation(
     validate_startup_requirements(settings)
 
 
+def test_validate_agent_runtime_startup_requirements_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skills_dir = tmp_path / "skills"
+    output_dir = tmp_path / "output"
+    data_dir = tmp_path / "data"
+    resume_library_dir = data_dir / "resume-library"
+    resume_tracks_dir = data_dir / "resume-tracks"
+    resume_docx_tracks_dir = data_dir / "resume-docx-tracks"
+    skills_dir.mkdir()
+    output_dir.mkdir()
+    data_dir.mkdir()
+    resume_library_dir.mkdir()
+    resume_tracks_dir.mkdir()
+    resume_docx_tracks_dir.mkdir()
+
+    base_resume_docx = data_dir / "base_resume.docx"
+    base_resume_text = data_dir / "base_resume.md"
+    gmail_credentials = data_dir / "credentials.json"
+    base_resume_docx.write_text("docx-placeholder", encoding="utf-8")
+    base_resume_text.write_text("resume text", encoding="utf-8")
+    gmail_credentials.write_text("{}", encoding="utf-8")
+    for index in range(3):
+        (resume_tracks_dir / f"track_{index}.json").write_text("{}", encoding="utf-8")
+        (resume_docx_tracks_dir / f"track_{index}.docx").write_text("docx-placeholder", encoding="utf-8")
+
+    set_env(
+        monkeypatch,
+        {
+            "SKILLS_DIR": str(skills_dir),
+            "OUTPUT_DIR": str(output_dir),
+            "BASE_RESUME_DOCX": str(base_resume_docx),
+            "BASE_RESUME_TEXT": str(base_resume_text),
+            "RESUME_LIBRARY_DIR": str(resume_library_dir),
+            "RESUME_TRACKS_DIR": str(resume_tracks_dir),
+            "RESUME_DOCX_TRACKS_DIR": str(resume_docx_tracks_dir),
+            "GMAIL_CREDENTIALS_PATH": str(gmail_credentials),
+            "GMAIL_TOKEN_PATH": str(data_dir / "token.json"),
+        },
+    )
+    settings = Settings()
+    validate_agent_runtime_startup_requirements(settings)
+
+
+def test_validate_agent_runtime_startup_requirements_reports_missing_resume_tracks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skills_dir = tmp_path / "skills"
+    output_dir = tmp_path / "output"
+    data_dir = tmp_path / "data"
+    resume_library_dir = data_dir / "resume-library"
+    resume_tracks_dir = data_dir / "resume-tracks"
+    resume_docx_tracks_dir = data_dir / "resume-docx-tracks"
+    skills_dir.mkdir()
+    output_dir.mkdir()
+    data_dir.mkdir()
+    resume_library_dir.mkdir()
+    resume_tracks_dir.mkdir()
+    resume_docx_tracks_dir.mkdir()
+
+    base_resume_docx = data_dir / "base_resume.docx"
+    base_resume_text = data_dir / "base_resume.md"
+    gmail_credentials = data_dir / "credentials.json"
+    base_resume_docx.write_text("docx-placeholder", encoding="utf-8")
+    base_resume_text.write_text("resume text", encoding="utf-8")
+    gmail_credentials.write_text("{}", encoding="utf-8")
+
+    set_env(
+        monkeypatch,
+        {
+            "SKILLS_DIR": str(skills_dir),
+            "OUTPUT_DIR": str(output_dir),
+            "BASE_RESUME_DOCX": str(base_resume_docx),
+            "BASE_RESUME_TEXT": str(base_resume_text),
+            "RESUME_LIBRARY_DIR": str(resume_library_dir),
+            "RESUME_TRACKS_DIR": str(resume_tracks_dir),
+            "RESUME_DOCX_TRACKS_DIR": str(resume_docx_tracks_dir),
+            "GMAIL_CREDENTIALS_PATH": str(gmail_credentials),
+            "GMAIL_TOKEN_PATH": str(data_dir / "token.json"),
+        },
+    )
+    settings = Settings()
+    with pytest.raises(RuntimeError, match="expected at least 3 JSON tracks"):
+        validate_agent_runtime_startup_requirements(settings)
+
+
 def test_get_settings_returns_cached_instance(monkeypatch: pytest.MonkeyPatch) -> None:
     set_env(monkeypatch)
     clear_settings_cache()
@@ -319,5 +412,20 @@ def test_clear_settings_cache_forces_reload(monkeypatch: pytest.MonkeyPatch) -> 
     third = get_settings()
     assert third.manager_model == "model-b"
     assert third is not first
+
+
+def test_settings_allow_anthropic_compatible_auth_token_without_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    overrides = {
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_AUTH_TOKEN": "or-test-token",
+        "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+    }
+    set_env(monkeypatch, overrides)
+    settings = Settings()
+    assert settings.anthropic_api_key is None or settings.anthropic_api_key.get_secret_value() == ""
+    assert settings.anthropic_auth_token is not None
+    assert settings.anthropic_base_url == "https://openrouter.ai/api"
 
 

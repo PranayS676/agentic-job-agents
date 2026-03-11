@@ -12,6 +12,11 @@ Owns watcher loops, manager orchestration, LLM agents, content generation, traci
 
 Future frontend work should talk only to the backend process. The backend and agent runtime communicate through PostgreSQL state, not direct service calls.
 
+Current artifact policy:
+- DOCX is the editable source of truth.
+- Per-track resume masters live under `data/resume-docx-tracks/`.
+- DOCX is also the active outbound attachment format.
+
 ## Repository Layout
 ```text
 apps/
@@ -68,7 +73,7 @@ Responsibilities:
 - Agent runtime:
   - watcher queue processing
   - manager orchestration
-  - research / resume / PDF / outbound agents
+  - research / resume / outbound agents
   - `pipeline_runs`, `resume_versions`, `outbox`, `agent_traces`
 
 ## Durable Polling Behavior
@@ -85,8 +90,26 @@ Important path settings:
 ```env
 BASE_RESUME_DOCX=data/base_resume.docx
 BASE_RESUME_TEXT=data/base_resume.md
+RESUME_LIBRARY_DIR=data/resume-library
+RESUME_TRACKS_DIR=data/resume-tracks
+RESUME_DOCX_TRACKS_DIR=data/resume-docx-tracks
 OUTPUT_DIR=output
 SKILLS_DIR=apps/agent-runtime/skills
+```
+
+Notes:
+1. `data/base_resume.docx` should always be a valid DOCX file.
+2. `data/resume-docx-tracks/` is the real operational source for tailored editing.
+3. Outbound delivery uses the edited DOCX as the attachment artifact.
+
+Build normalized resume tracks after updating or replacing the PDF resume variants:
+```bash
+python -m poetry run python scripts/build_resume_tracks.py
+```
+
+Bootstrap per-track editable DOCX files after building or changing the track inventory:
+```bash
+python -m poetry run python scripts/bootstrap_resume_docx_tracks.py
 ```
 
 ## Database Setup
@@ -142,6 +165,29 @@ Health now includes:
 - `last_poll_completed_at`
 - `last_webhook_at`
 
+## Backend Ops API
+The backend now exposes a small read-only operator API for future dashboard work.
+
+Available endpoints:
+- `GET /api/ops/overview`
+- `GET /api/ops/review-queue?limit=20`
+- `GET /api/ops/pipeline-runs?limit=50`
+- `GET /api/ops/polling-status`
+
+Examples:
+```bash
+curl http://localhost:8000/api/ops/overview
+curl "http://localhost:8000/api/ops/review-queue?limit=20"
+curl "http://localhost:8000/api/ops/pipeline-runs?limit=50"
+curl http://localhost:8000/api/ops/polling-status
+```
+
+Use these endpoints to confirm:
+- backlog size
+- review queue size
+- recent pipeline terminal states
+- per-group polling cursor health
+
 ## Gmail Setup
 1. Enable Gmail API in Google Cloud.
 2. Put OAuth client credentials at `data/credentials.json`.
@@ -165,7 +211,7 @@ python -m poetry run pytest -q
 
 Run backend-focused tests:
 ```bash
-python -m poetry run pytest tests/unit/backend/test_ingest_webhook.py tests/unit/backend/test_waha_polling.py tests/integration/backend/test_ingest_integration.py tests/integration/backend/test_polling_catchup_integration.py -q
+python -m poetry run pytest tests/unit/backend/test_ingest_webhook.py tests/unit/backend/test_waha_polling.py tests/integration/backend/test_ingest_integration.py tests/integration/backend/test_polling_catchup_integration.py tests/integration/backend/test_ops_api_integration.py -q
 ```
 
 Run agent-runtime-focused tests:
@@ -179,10 +225,58 @@ set RUN_LIVE_WAHA_TESTS=1
 python -m poetry run pytest tests/integration/system/test_waha_live.py -q -m live_waha
 ```
 
+Run live manager relevance smoke tests:
+```bash
+set RUN_LIVE_ANTHROPIC_TESTS=1
+python -m poetry run pytest tests/integration/system/test_manager_relevance_live.py -q -m live_anthropic
+```
+
+Run the full local seed dataset against the live manager relevance prompt:
+```bash
+python -m poetry run python scripts/evaluate_manager_relevance_live.py --dataset output/relevance_review/waha_last_24h_relevance_seed_dataset.json
+```
+
+Run the curated live ResumeEditorAgent review batch:
+```bash
+python -m poetry run python scripts/evaluate_resume_editor_live.py --dataset output/relevance_review/waha_last_24h_relevance_seed_dataset.json --limit 8
+```
+
+Run the live ResumeEditorAgent smoke test:
+```bash
+set RUN_LIVE_ANTHROPIC_TESTS=1
+python -m poetry run pytest tests/integration/system/test_resume_editor_live.py -q -m live_anthropic
+```
+
 Run live Gmail integration:
 ```bash
 python -m poetry run pytest tests/integration/system/test_gmail_live.py -q
 ```
+
+Run Step 8 deterministic system validation:
+```bash
+python -m poetry run pytest tests/integration/system/test_system_validation_integration.py -q
+```
+
+Run the supervised live system validation harness:
+```bash
+python -m poetry run python scripts/run_system_validation_live.py --cases output/system_validation/cases.json
+```
+
+If any case is allowed to send externally, require the explicit flag:
+```bash
+python -m poetry run python scripts/run_system_validation_live.py --cases output/system_validation/cases.json --allow-live-send
+```
+
+The live runner writes review artifacts under:
+- `output/system_validation/run_<timestamp>/summary.json`
+- `output/system_validation/run_<timestamp>/summary.md`
+- one subdirectory per case with DB and ops API snapshots
+
+Recommended startup order for Step 8:
+1. Start WAHA and PostgreSQL
+2. Start `job-backend`
+3. Start `job-agent-runtime` only when you want backlog drained
+4. Use `/api/ops/overview` and `/api/ops/review-queue` to confirm system state
 
 ## Observability SQL
 Recent pipeline runs:

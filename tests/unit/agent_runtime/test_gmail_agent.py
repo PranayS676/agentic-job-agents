@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,7 +27,6 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "MANAGER_MODEL": "claude-opus-4-6",
         "RESEARCH_MODEL": "claude-sonnet-4-6",
         "RESUME_EDITOR_MODEL": "claude-sonnet-4-6",
-        "PDF_CONVERTER_MODEL": "claude-haiku-4-5-20251001",
         "GMAIL_AGENT_MODEL": "claude-sonnet-4-6",
         "WHATSAPP_MSG_MODEL": "claude-sonnet-4-6",
         "DATABASE_URL": "postgresql+asyncpg://postgres:password@localhost:5432/jobagent",
@@ -68,7 +67,7 @@ async def test_gmail_agent_run_success(monkeypatch: pytest.MonkeyPatch, tmp_path
 
     import job_agent_runtime.agents.base_agent as base_agent_module
 
-    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda api_key: SimpleNamespace())  # noqa: ARG005
+    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda *args, **kwargs: SimpleNamespace())  # noqa: ARG005
 
     settings = get_settings()
     connector = SimpleNamespace(send=AsyncMock(return_value="gmail-msg-1"))
@@ -84,9 +83,10 @@ async def test_gmail_agent_run_success(monkeypatch: pytest.MonkeyPatch, tmp_path
         context={
             "job_title": "ML Engineer",
             "company": "Acme",
-            "job_summary": "Python and ML",
+            "job_summary": "Python and ML contract role on W2 or C2C",
             "poster_email": "recruiter@example.com",
-            "pdf_path": "output/pdfs/resume.pdf",
+            "attachment_path": "output/resumes/resume.docx",
+            "relevance_decision": "fit",
         },
         trace_id=uuid4(),
     )
@@ -96,6 +96,48 @@ async def test_gmail_agent_run_success(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert result["recipient"] == "recruiter@example.com"
     assert result["external_id"] == "gmail-msg-1"
     connector.send.assert_awaited_once()
+    prompt = agent._call_model.await_args.kwargs["messages"][-1]["content"]  # type: ignore[attr-defined]
+    assert "delivery_mode: send" in prompt
+    assert "mentions_contract" in prompt
+    assert "mentions_w2" in prompt
+
+
+@pytest.mark.asyncio
+async def test_gmail_agent_draft_mode_does_not_send(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _set_required_env(monkeypatch, tmp_path)
+
+    import job_agent_runtime.agents.base_agent as base_agent_module
+
+    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda *args, **kwargs: SimpleNamespace())  # noqa: ARG005
+
+    settings = get_settings()
+    connector = SimpleNamespace(send=AsyncMock(return_value="gmail-msg-1"))
+    agent = GmailAgent(
+        db_session=SimpleNamespace(),
+        tracer=SimpleNamespace(trace=AsyncMock(), update_pipeline_status=AsyncMock()),
+        settings=settings,
+        connector=connector,
+    )
+    agent._call_model = AsyncMock(return_value={"text": '{"subject":"Apply","body":"Hello there"}'})  # type: ignore[method-assign]
+
+    result = await agent.run(
+        context={
+            "job_title": "Platform Engineer",
+            "company": "Acme",
+            "job_summary": "Project-based platform role on W2",
+            "poster_email": "recruiter@example.com",
+            "attachment_path": "output/resumes/resume.docx",
+            "relevance_decision": "okayish",
+        },
+        trace_id=uuid4(),
+        delivery_mode="draft",
+    )
+
+    assert result["sent"] is False
+    assert result["external_id"] is None
+    connector.send.assert_not_awaited()
+    prompt = agent._call_model.await_args.kwargs["messages"][-1]["content"]  # type: ignore[attr-defined]
+    assert "delivery_mode: draft" in prompt
 
 
 @pytest.mark.asyncio
@@ -104,7 +146,7 @@ async def test_gmail_agent_missing_email(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     import job_agent_runtime.agents.base_agent as base_agent_module
 
-    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda api_key: SimpleNamespace())  # noqa: ARG005
+    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda *args, **kwargs: SimpleNamespace())  # noqa: ARG005
 
     settings = get_settings()
     agent = GmailAgent(
@@ -117,6 +159,32 @@ async def test_gmail_agent_missing_email(monkeypatch: pytest.MonkeyPatch, tmp_pa
     with pytest.raises(ValueError, match="poster_email is required"):
         await agent.run(
             context={"job_title": "ML Engineer"},
+            trace_id=uuid4(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_gmail_agent_missing_attachment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _set_required_env(monkeypatch, tmp_path)
+
+    import job_agent_runtime.agents.base_agent as base_agent_module
+
+    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda *args, **kwargs: SimpleNamespace())  # noqa: ARG005
+
+    settings = get_settings()
+    agent = GmailAgent(
+        db_session=SimpleNamespace(),
+        tracer=SimpleNamespace(trace=AsyncMock(), update_pipeline_status=AsyncMock()),
+        settings=settings,
+        connector=SimpleNamespace(send=AsyncMock()),
+    )
+
+    with pytest.raises(ValueError, match="attachment_path is required"):
+        await agent.run(
+            context={
+                "job_title": "ML Engineer",
+                "poster_email": "recruiter@example.com",
+            },
             trace_id=uuid4(),
         )
 

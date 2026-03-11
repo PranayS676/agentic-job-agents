@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
@@ -83,20 +83,41 @@ def _set_required_runtime_env(
 ) -> None:
     data_dir = tmp_path / "data"
     output_dir = tmp_path / "output"
+    resume_library_dir = data_dir / "resume-library"
+    resume_tracks_dir = data_dir / "resume-tracks"
     skills_dir = ROOT_DIR / "apps" / "agent-runtime" / "skills"
     data_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+    resume_library_dir.mkdir(parents=True, exist_ok=True)
+    resume_tracks_dir.mkdir(parents=True, exist_ok=True)
 
     (data_dir / "base_resume.docx").write_text("placeholder", encoding="utf-8")
     (data_dir / "base_resume.md").write_text("placeholder", encoding="utf-8")
     (data_dir / "credentials.json").write_text("{}", encoding="utf-8")
+    track_payload = {
+        "display_name": "Python ML Track",
+        "raw_text": "Summary\nPython ML engineer\nSkills\nPython AWS LLM\nExperience\nRecent ML role",
+        "normalized_text": "Summary\nPython ML engineer\nSkills\nPython AWS LLM\nExperience\nRecent ML role",
+        "sections": {
+            "summary": "Python ML engineer",
+            "skills": "Python\nAWS\nLLM",
+            "experience_recent_role": "Built ML services on AWS.",
+            "education": "MS Computer Science",
+        },
+        "role_bias": ["ai_ml", "backend_python", "cloud_platform"],
+        "keywords": ["python", "aws", "llm", "machine learning"],
+    }
+    for suffix in ("python_ml", "data_platform", "general_backend"):
+        payload = dict(track_payload)
+        payload["track_id"] = f"resume_track_{suffix}"
+        payload["source_pdf_path"] = str(resume_library_dir / f"resume_track_{suffix}.pdf")
+        (resume_tracks_dir / f"resume_track_{suffix}.json").write_text(json.dumps(payload), encoding="utf-8")
 
     env = {
         "ANTHROPIC_API_KEY": "sk-ant-test",
         "MANAGER_MODEL": "claude-opus-4-6",
         "RESEARCH_MODEL": "claude-sonnet-4-6",
         "RESUME_EDITOR_MODEL": "claude-sonnet-4-6",
-        "PDF_CONVERTER_MODEL": "claude-haiku-4-5-20251001",
         "GMAIL_AGENT_MODEL": "claude-sonnet-4-6",
         "WHATSAPP_MSG_MODEL": "claude-sonnet-4-6",
         "DATABASE_URL": database_url,
@@ -115,6 +136,8 @@ def _set_required_runtime_env(
         "MAX_RESUME_EDIT_ITERATIONS": "2",
         "BASE_RESUME_DOCX": str(data_dir / "base_resume.docx"),
         "BASE_RESUME_TEXT": str(data_dir / "base_resume.md"),
+        "RESUME_LIBRARY_DIR": str(resume_library_dir),
+        "RESUME_TRACKS_DIR": str(resume_tracks_dir),
         "OUTPUT_DIR": str(output_dir),
         "SKILLS_DIR": str(skills_dir),
         "LOG_LEVEL": "INFO",
@@ -125,25 +148,36 @@ def _set_required_runtime_env(
         monkeypatch.setenv(key, value)
 
 
-class _FailingWhatsAppAgent(StubWhatsAppMsgAgent):
-    async def run(self, context: dict, trace_id):  # noqa: ANN001
-        _ = (context, trace_id)
-        return {
-            "sent": False,
-            "channel": "whatsapp",
-            "recipient": str(context["poster_number"]),
-            "subject": None,
-            "body_preview": "WAHA send failed",
-            "attachment_path": context.get("pdf_path"),
-            "external_id": None,
-        }
+class _PolicyAwareWhatsAppAgent(StubWhatsAppMsgAgent):
+    async def run(self, context: dict, trace_id, delivery_mode: str = "send"):  # noqa: ANN001
+        if delivery_mode == "draft":
+            return {
+                "sent": False,
+                "channel": "whatsapp",
+                "recipient": str(context["poster_number"]),
+                "subject": None,
+                "body_preview": "Draft WhatsApp review body",
+                "attachment_path": context.get("attachment_path"),
+                "external_id": None,
+            }
+        if str(context.get("poster_number")) == "+15550001111":
+            return {
+                "sent": False,
+                "channel": "whatsapp",
+                "recipient": str(context["poster_number"]),
+                "subject": None,
+                "body_preview": "WAHA send failed",
+                "attachment_path": context.get("attachment_path"),
+                "external_id": None,
+            }
+        return await super().run(context=context, trace_id=trace_id, delivery_mode=delivery_mode)
 
 
 class _RoutingFactory(DefaultStubAgentFactory):
     def __init__(self, settings) -> None:  # noqa: ANN001
         super().__init__(settings=settings)
         self._gmail = StubGmailAgent()
-        self._whatsapp = _FailingWhatsAppAgent()
+        self._whatsapp = _PolicyAwareWhatsAppAgent()
 
 
 @pytest.mark.asyncio
@@ -165,29 +199,50 @@ async def test_outbound_routing_statuses(monkeypatch: pytest.MonkeyPatch, tmp_pa
     async def _fake_call_model(self, messages, trace_id, tools=None, max_tokens=2048):  # noqa: ANN001, ARG002
         content = str(messages[-1].get("content", "")).lower()
         if "evaluate whether this whatsapp message" in content:
-            with_email = "recruiter@example.com" in content
+            message_text = content.split("message_text:", 1)[-1]
+            with_email = "recruiter@example.com" in message_text or "reviewer@example.com" in message_text
+            decision = "okayish" if "okayish" in message_text else "fit"
+            score = 6 if decision == "okayish" else 8
+            email = None
+            poster_number = "+15550001111"
+            if "recruiter@example.com" in message_text:
+                email = "recruiter@example.com"
+            elif "reviewer@example.com" in message_text:
+                email = "reviewer@example.com"
+            if "no email" in message_text and decision == "okayish":
+                poster_number = "+15550002222"
             payload = {
                 "relevant": True,
-                "score": 8,
+                "decision": decision,
+                "decision_score": 0.5 if decision == "okayish" else 1.0,
+                "score": score,
                 "job_title": "ML Engineer",
                 "company": "Acme",
                 "job_summary": "Python and ML role",
-                "poster_email": "recruiter@example.com" if with_email else None,
-                "poster_number": "+15550001111",
+                "poster_email": email if with_email else None,
+                "poster_number": poster_number,
                 "discard_reason": None,
                 "relevance_reason": "Strong relevance",
             }
             return {"text": json.dumps(payload)}
 
-        if "job summary:" in content and "candidate resume:" in content:
+        if "shortlisted_tracks" in content and "selected_resume_track" in content:
             payload = {
                 "add_items": [{"section": "skills", "action": "x", "reason": "x", "priority": 1}],
                 "remove_items": [],
                 "keywords_to_inject": ["Python"],
-                "sections_to_edit": ["Summary"],
+                "sections_to_edit": ["summary", "skills", "experience_recent_role"],
                 "ats_score_estimate_before": 55,
                 "ats_score_estimate_after": 78,
                 "research_reasoning": "ok",
+                "selected_resume_track": "resume_track_python_ml",
+                "selected_resume_source_pdf": "data/resume-library/resume_track_python_ml.pdf",
+                "selected_resume_match_reason": "Strongest Python and ML evidence density.",
+                "experience_target_section": "experience_recent_role",
+                "summary_focus": "Align the summary to Python and ML delivery impact.",
+                "skills_gap_notes": ["Surface grounded FastAPI and LLM keywords."],
+                "hard_gaps": [],
+                "edit_scope": ["summary", "skills", "experience_recent_role"],
             }
             return {"text": json.dumps(payload)}
 
@@ -208,7 +263,9 @@ async def test_outbound_routing_statuses(monkeypatch: pytest.MonkeyPatch, tmp_pa
                         INSERT INTO whatsapp_messages (group_id, sender_number, message_text, message_hash)
                         VALUES
                           ('GROUP1@g.us', '+15550000001', 'Python ML role recruiter@example.com', 'wm_step9_hash_1'),
-                          ('GROUP1@g.us', '+15550000002', 'Python ML role no email', 'wm_step9_hash_2')
+                          ('GROUP1@g.us', '+15550000002', 'Python ML role no email', 'wm_step9_hash_2'),
+                          ('GROUP1@g.us', '+15550000003', 'Okayish cloud data role reviewer@example.com', 'wm_step9_hash_3'),
+                          ('GROUP1@g.us', '+15550000004', 'Okayish platform role no email', 'wm_step9_hash_4')
                         """
                     )
                 )
@@ -255,6 +312,8 @@ async def test_outbound_routing_statuses(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
         first = rows[0]
         second = rows[1]
+        third = rows[2]
+        fourth = rows[3]
         await pipeline_runner.run(
             message=type(
                 "Message",
@@ -282,6 +341,34 @@ async def test_outbound_routing_statuses(monkeypatch: pytest.MonkeyPatch, tmp_pa
                 )(),
                 trace_id=trace_rows[1][0],
             )
+        review_result = await pipeline_runner.run(
+            message=type(
+                "Message",
+                (),
+                {
+                    "id": third["id"],
+                    "group_id": third["group_id"],
+                    "sender_number": third["sender_number"],
+                    "message_text": third["message_text"],
+                },
+            )(),
+            trace_id=trace_rows[2][0],
+        )
+        assert review_result["action"] == "review_required"
+        review_whatsapp_result = await pipeline_runner.run(
+            message=type(
+                "Message",
+                (),
+                {
+                    "id": fourth["id"],
+                    "group_id": fourth["group_id"],
+                    "sender_number": fourth["sender_number"],
+                    "message_text": fourth["message_text"],
+                },
+            )(),
+            trace_id=trace_rows[3][0],
+        )
+        assert review_whatsapp_result["action"] == "review_required"
 
         sync_engine = create_engine(sync_test_url)
         try:
@@ -289,16 +376,20 @@ async def test_outbound_routing_statuses(monkeypatch: pytest.MonkeyPatch, tmp_pa
                 outbox_rows = conn.execute(
                     text("SELECT channel, status FROM outbox ORDER BY sent_at ASC")
                 ).all()
-                assert len(outbox_rows) == 2
+                assert len(outbox_rows) == 4
                 assert outbox_rows[0][0] == "email"
                 assert outbox_rows[0][1] == "sent"
                 assert outbox_rows[1][0] == "whatsapp"
                 assert outbox_rows[1][1] == "failed"
+                assert outbox_rows[2][0] == "email"
+                assert outbox_rows[2][1] == "review_required"
+                assert outbox_rows[3][0] == "whatsapp"
+                assert outbox_rows[3][1] == "review_required"
 
                 statuses = conn.execute(
                     text("SELECT status FROM pipeline_runs ORDER BY created_at ASC")
                 ).scalars().all()
-                assert statuses == ["sent", "failed"]
+                assert statuses == ["sent", "failed", "review_required", "review_required"]
         finally:
             sync_engine.dispose()
     finally:

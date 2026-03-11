@@ -7,14 +7,21 @@ from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from job_platform.config import get_settings
+from job_platform.database import AsyncSessionLocal
 
 from job_backend.polling.waha_polling import WahaPollingService
+from job_backend.services.ops import (
+    fetch_ops_overview,
+    fetch_pipeline_runs,
+    fetch_polling_status,
+    fetch_review_queue,
+)
 
 
 class IngestService:
@@ -289,6 +296,34 @@ def create_app(*, enable_polling: bool = True, service: IngestService | None = N
         if ingest_service.last_webhook_at:
             payload["last_webhook_at"] = ingest_service.last_webhook_at.isoformat()
         return payload
+
+    @app.get("/api/ops/overview")
+    async def ops_overview(request: Request):
+        ingest_service: IngestService = request.app.state.ingest_service
+        async with AsyncSessionLocal() as session:
+            return await fetch_ops_overview(
+                session,
+                groups_monitored=len(ingest_service.settings.whatsapp_group_ids_list),
+                polling_enabled=ingest_service.enable_polling,
+            )
+
+    @app.get("/api/ops/review-queue")
+    async def ops_review_queue(limit: int = Query(default=20, ge=1, le=100)):
+        async with AsyncSessionLocal() as session:
+            return await fetch_review_queue(session, limit=limit)
+
+    @app.get("/api/ops/pipeline-runs")
+    async def ops_pipeline_runs(
+        status: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=200),
+    ):
+        async with AsyncSessionLocal() as session:
+            return await fetch_pipeline_runs(session, limit=limit, status=status)
+
+    @app.get("/api/ops/polling-status")
+    async def ops_polling_status():
+        async with AsyncSessionLocal() as session:
+            return await fetch_polling_status(session)
 
     return app
 

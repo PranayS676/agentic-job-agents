@@ -1,19 +1,46 @@
-# My Target Profile - Fill This In Before Running
+# Target Profile
 
-## Target Roles
-- ML Engineer
+## Primary Role Families
+- Machine Learning Engineer
 - AI Engineer
-- Data Scientist
-- Python Developer (AI/ML focus)
-- Add your own target role
+- Generative AI Engineer
+- Applied AI Engineer
+- MLOps Engineer
+- Python Engineer for AI / ML platforms
+- Data Scientist roles with strong production AI / Python alignment
 
-## Tech Stack
-- Languages: Python
-- ML/AI: LLMs, RAG, Anthropic SDK
-- Infra: AWS, Docker, PostgreSQL
-- Add your own technologies
+## Secondary Role Families
+- backend or platform roles with clear AI / ML / data-platform overlap
+- document intelligence or search / retrieval engineering
+- agent platform and workflow automation roles
 
-## Dealbreakers
-- Roles requiring relocation when unavailable
-- Roles requiring security clearance
-- Add your own constraints
+## Preferred Stack Signals
+- Python
+- FastAPI
+- LLMs
+- RAG
+- agent systems
+- model serving / inference
+- AWS / GCP
+- Docker / Kubernetes
+- PostgreSQL
+- Databricks / PySpark
+- CI/CD
+- observability
+
+## Employment Preference
+- highest preference: C2C
+- highest preference: project-based work
+- strong acceptance: W2
+- acceptable if profile fit is strong: contract, contract-to-hire, project-based work
+- do not discard solely because the role is not full-time
+
+## Negative Signals
+- clearly unrelated non-technical roles
+- tech stacks with little or no Python / AI / ML overlap
+- vague recruiter blasts with no role detail
+- roles that demand a background the candidate clearly does not have
+
+## Hard Constraints
+- keep broad role coverage across jobs that fit the candidate profile
+- do not over-filter opportunities that match the profile

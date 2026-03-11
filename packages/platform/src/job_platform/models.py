@@ -160,7 +160,7 @@ class ResumeVersion(Base):
     )
     version_number: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     docx_path: Mapped[str | None] = mapped_column(Text, nullable=True)
-    pdf_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attachment_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     changes_made: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     ats_score_before: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ats_score_after: Mapped[int | None] = mapped_column(Integer, nullable=True)

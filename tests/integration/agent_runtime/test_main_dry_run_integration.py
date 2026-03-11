@@ -1,11 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from docx import Document
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -81,22 +83,52 @@ def _set_required_runtime_env(
 ) -> None:
     data_dir = tmp_path / "data"
     output_dir = tmp_path / "output"
+    resume_library_dir = data_dir / "resume-library"
+    resume_tracks_dir = data_dir / "resume-tracks"
+    resume_docx_tracks_dir = data_dir / "resume-docx-tracks"
     skills_dir = ROOT_DIR / "apps" / "agent-runtime" / "skills"
     data_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+    resume_library_dir.mkdir(parents=True, exist_ok=True)
+    resume_tracks_dir.mkdir(parents=True, exist_ok=True)
+    resume_docx_tracks_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "resumes").mkdir(parents=True, exist_ok=True)
-    (output_dir / "pdfs").mkdir(parents=True, exist_ok=True)
-
-    (data_dir / "base_resume.docx").write_text("placeholder", encoding="utf-8")
+    base_docx = data_dir / "base_resume.docx"
+    doc = Document()
+    doc.add_heading("Summary", level=1)
+    doc.add_paragraph("Placeholder summary")
+    doc.add_heading("Skills", level=1)
+    doc.add_paragraph("Python, SQL")
+    doc.add_heading("Relevant Experience", level=1)
+    doc.add_paragraph("Built backend and AI services.")
+    doc.save(str(base_docx))
     (data_dir / "base_resume.md").write_text("placeholder", encoding="utf-8")
     (data_dir / "credentials.json").write_text("{}", encoding="utf-8")
+    track_payload = {
+        "display_name": "Python ML Track",
+        "raw_text": "Summary\nPython ML engineer\nSkills\nPython AWS LLM\nExperience\nRecent ML role",
+        "normalized_text": "Summary\nPython ML engineer\nSkills\nPython AWS LLM\nExperience\nRecent ML role",
+        "sections": {
+            "summary": "Python ML engineer",
+            "skills": "Python\nAWS\nLLM",
+            "experience_recent_role": "Built ML services on AWS.",
+            "education": "MS Computer Science",
+        },
+        "role_bias": ["ai_ml", "backend_python", "cloud_platform"],
+        "keywords": ["python", "aws", "llm", "machine learning"],
+    }
+    for suffix in ("python_ml", "data_platform", "general_backend"):
+        payload = dict(track_payload)
+        payload["track_id"] = f"resume_track_{suffix}"
+        payload["source_pdf_path"] = str(resume_library_dir / f"resume_track_{suffix}.pdf")
+        (resume_tracks_dir / f"resume_track_{suffix}.json").write_text(json.dumps(payload), encoding="utf-8")
+        doc.save(str(resume_docx_tracks_dir / f"resume_track_{suffix}.docx"))
 
     env = {
         "ANTHROPIC_API_KEY": "sk-ant-test",
         "MANAGER_MODEL": "claude-opus-4-6",
         "RESEARCH_MODEL": "claude-sonnet-4-6",
         "RESUME_EDITOR_MODEL": "claude-sonnet-4-6",
-        "PDF_CONVERTER_MODEL": "claude-haiku-4-5-20251001",
         "GMAIL_AGENT_MODEL": "claude-sonnet-4-6",
         "WHATSAPP_MSG_MODEL": "claude-sonnet-4-6",
         "DATABASE_URL": database_url,
@@ -113,8 +145,11 @@ def _set_required_runtime_env(
         "MIN_RELEVANCE_SCORE": "6",
         "MIN_ATS_SCORE": "65",
         "MAX_RESUME_EDIT_ITERATIONS": "2",
-        "BASE_RESUME_DOCX": str(data_dir / "base_resume.docx"),
+        "BASE_RESUME_DOCX": str(base_docx),
         "BASE_RESUME_TEXT": str(data_dir / "base_resume.md"),
+        "RESUME_LIBRARY_DIR": str(resume_library_dir),
+        "RESUME_TRACKS_DIR": str(resume_tracks_dir),
+        "RESUME_DOCX_TRACKS_DIR": str(resume_docx_tracks_dir),
         "OUTPUT_DIR": str(output_dir),
         "SKILLS_DIR": str(skills_dir),
         "LOG_LEVEL": "INFO",
@@ -172,8 +207,14 @@ async def test_dry_run_rolls_back_transient_rows(
             with db_engine.connect() as conn:
                 message_count = conn.execute(text("SELECT count(*) FROM whatsapp_messages")).scalar_one()
                 pipeline_count = conn.execute(text("SELECT count(*) FROM pipeline_runs")).scalar_one()
+                resume_count = conn.execute(text("SELECT count(*) FROM resume_versions")).scalar_one()
+                outbox_count = conn.execute(text("SELECT count(*) FROM outbox")).scalar_one()
+                trace_count = conn.execute(text("SELECT count(*) FROM agent_traces")).scalar_one()
                 assert message_count == 0
                 assert pipeline_count == 0
+                assert resume_count == 0
+                assert outbox_count == 0
+                assert trace_count == 0
         finally:
             db_engine.dispose()
     finally:
@@ -181,5 +222,6 @@ async def test_dry_run_rolls_back_transient_rows(
         clear_settings_cache()
         if upgraded:
             _run_alembic("downgrade")
+
 
 

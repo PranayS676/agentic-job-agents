@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +17,7 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     skills_dir = Path.cwd() / "apps" / "agent-runtime" / "skills"
     data_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "pdfs").mkdir(parents=True, exist_ok=True)
+    (output_dir / "resumes").mkdir(parents=True, exist_ok=True)
 
     (data_dir / "base_resume.docx").write_text("docx", encoding="utf-8")
     (data_dir / "base_resume.md").write_text("resume", encoding="utf-8")
@@ -28,7 +28,6 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "MANAGER_MODEL": "claude-opus-4-6",
         "RESEARCH_MODEL": "claude-sonnet-4-6",
         "RESUME_EDITOR_MODEL": "claude-sonnet-4-6",
-        "PDF_CONVERTER_MODEL": "claude-haiku-4-5-20251001",
         "GMAIL_AGENT_MODEL": "claude-sonnet-4-6",
         "WHATSAPP_MSG_MODEL": "claude-sonnet-4-6",
         "DATABASE_URL": "postgresql+asyncpg://postgres:password@localhost:5432/jobagent",
@@ -69,7 +68,7 @@ async def test_whatsapp_agent_run_success(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     import job_agent_runtime.agents.base_agent as base_agent_module
 
-    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda api_key: SimpleNamespace())  # noqa: ARG005
+    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda *args, **kwargs: SimpleNamespace())  # noqa: ARG005
 
     settings = get_settings()
     connector = SimpleNamespace(
@@ -84,16 +83,17 @@ async def test_whatsapp_agent_run_success(monkeypatch: pytest.MonkeyPatch, tmp_p
     )
     agent._call_model = AsyncMock(return_value={"text": '{"message_text":"Hi from agent"}'})  # type: ignore[method-assign]
 
-    pdf_path = tmp_path / "output" / "pdfs" / "resume.pdf"
-    pdf_path.write_bytes(b"%PDF-1.4\n")
+    attachment_path = tmp_path / "output" / "resumes" / "resume.docx"
+    attachment_path.write_text("docx", encoding="utf-8")
 
     result = await agent.run(
         context={
             "job_title": "ML Engineer",
             "company": "Acme",
-            "job_summary": "Python and ML",
+            "job_summary": "Python and ML contract role on W2 or C2C",
             "poster_number": "+15550001111",
-            "pdf_path": str(pdf_path),
+            "attachment_path": str(attachment_path),
+            "relevance_decision": "fit",
         },
         trace_id=uuid4(),
     )
@@ -103,6 +103,103 @@ async def test_whatsapp_agent_run_success(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert result["recipient"] == "+15550001111"
     assert result["external_id"] == "waha-msg-1"
     connector.send_message_with_file.assert_awaited_once()
+    prompt = agent._call_model.await_args.kwargs["messages"][-1]["content"]  # type: ignore[attr-defined]
+    assert "delivery_mode: send" in prompt
+    assert "mentions_contract" in prompt
+    assert "mentions_w2" in prompt
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_agent_draft_mode_does_not_send(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _set_required_env(monkeypatch, tmp_path)
+
+    import job_agent_runtime.agents.base_agent as base_agent_module
+
+    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda *args, **kwargs: SimpleNamespace())  # noqa: ARG005
+
+    settings = get_settings()
+    connector = SimpleNamespace(
+        send_message_with_file=AsyncMock(return_value={"ok": True, "data": {"id": "waha-msg-1"}}),
+        close=AsyncMock(),
+    )
+    agent = WhatsAppMsgAgent(
+        db_session=SimpleNamespace(),
+        tracer=SimpleNamespace(trace=AsyncMock(), update_pipeline_status=AsyncMock()),
+        settings=settings,
+        connector=connector,
+    )
+    agent._call_model = AsyncMock(return_value={"text": '{"message_text":"Draft review body"}'})  # type: ignore[method-assign]
+
+    attachment_path = tmp_path / "output" / "resumes" / "resume.docx"
+    attachment_path.write_text("docx", encoding="utf-8")
+
+    result = await agent.run(
+        context={
+            "job_title": "Cloud Data Engineer",
+            "company": "Acme",
+            "job_summary": "Project-based cloud data role on W2",
+            "poster_number": "+15550001111",
+            "attachment_path": str(attachment_path),
+            "relevance_decision": "okayish",
+        },
+        trace_id=uuid4(),
+        delivery_mode="draft",
+    )
+
+    assert result["sent"] is False
+    assert result["external_id"] is None
+    connector.send_message_with_file.assert_not_awaited()
+    prompt = agent._call_model.await_args.kwargs["messages"][-1]["content"]  # type: ignore[attr-defined]
+    assert "delivery_mode: draft" in prompt
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_agent_missing_poster_number(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _set_required_env(monkeypatch, tmp_path)
+
+    import job_agent_runtime.agents.base_agent as base_agent_module
+
+    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda *args, **kwargs: SimpleNamespace())  # noqa: ARG005
+
+    settings = get_settings()
+    agent = WhatsAppMsgAgent(
+        db_session=SimpleNamespace(),
+        tracer=SimpleNamespace(trace=AsyncMock(), update_pipeline_status=AsyncMock()),
+        settings=settings,
+        connector=SimpleNamespace(send_message_with_file=AsyncMock(), close=AsyncMock()),
+    )
+
+    with pytest.raises(ValueError, match="poster_number is required"):
+        await agent.run(
+            context={"job_title": "ML Engineer"},
+            trace_id=uuid4(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_agent_missing_attachment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _set_required_env(monkeypatch, tmp_path)
+
+    import job_agent_runtime.agents.base_agent as base_agent_module
+
+    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda *args, **kwargs: SimpleNamespace())  # noqa: ARG005
+
+    settings = get_settings()
+    agent = WhatsAppMsgAgent(
+        db_session=SimpleNamespace(),
+        tracer=SimpleNamespace(trace=AsyncMock(), update_pipeline_status=AsyncMock()),
+        settings=settings,
+        connector=SimpleNamespace(send_message_with_file=AsyncMock(), close=AsyncMock()),
+    )
+
+    with pytest.raises(ValueError, match="attachment_path is required"):
+        await agent.run(
+            context={
+                "job_title": "ML Engineer",
+                "poster_number": "+15550001111",
+            },
+            trace_id=uuid4(),
+        )
 
 
 @pytest.mark.asyncio
@@ -111,7 +208,7 @@ async def test_whatsapp_agent_send_failure(monkeypatch: pytest.MonkeyPatch, tmp_
 
     import job_agent_runtime.agents.base_agent as base_agent_module
 
-    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda api_key: SimpleNamespace())  # noqa: ARG005
+    monkeypatch.setattr(base_agent_module, "AsyncAnthropic", lambda *args, **kwargs: SimpleNamespace())  # noqa: ARG005
 
     settings = get_settings()
     connector = SimpleNamespace(
@@ -126,8 +223,8 @@ async def test_whatsapp_agent_send_failure(monkeypatch: pytest.MonkeyPatch, tmp_
     )
     agent._call_model = AsyncMock(return_value={"text": '{"message_text":"Hi from agent"}'})  # type: ignore[method-assign]
 
-    pdf_path = tmp_path / "output" / "pdfs" / "resume.pdf"
-    pdf_path.write_bytes(b"%PDF-1.4\n")
+    attachment_path = tmp_path / "output" / "resumes" / "resume.docx"
+    attachment_path.write_text("docx", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="WAHA send_message_with_file failed"):
         await agent.run(
@@ -136,7 +233,7 @@ async def test_whatsapp_agent_send_failure(monkeypatch: pytest.MonkeyPatch, tmp_
                 "company": "Acme",
                 "job_summary": "Python and ML",
                 "poster_number": "+15550001111",
-                "pdf_path": str(pdf_path),
+                "attachment_path": str(attachment_path),
             },
             trace_id=uuid4(),
         )

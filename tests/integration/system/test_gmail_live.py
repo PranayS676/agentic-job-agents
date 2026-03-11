@@ -117,9 +117,9 @@ async def test_gmail_live_send_and_outbox_persist(monkeypatch: pytest.MonkeyPatc
     async_engine = create_async_engine(async_test_url)
     session_factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
 
-    pdf_file = Path(settings.output_dir) / "pdfs" / "gmail_live_test.pdf"
-    pdf_file.parent.mkdir(parents=True, exist_ok=True)
-    pdf_file.write_bytes(b"%PDF-1.4\n% live test\n")
+    attachment_file = Path(settings.output_dir) / "resumes" / "gmail_live_test.docx"
+    attachment_file.parent.mkdir(parents=True, exist_ok=True)
+    attachment_file.write_text("live gmail docx test", encoding="utf-8")
 
     async def _fake_call_model(self, messages, trace_id, tools=None, max_tokens=2048):  # noqa: ANN001, ARG002
         return {"text": '{"subject":"Live Gmail Test","body":"This is an automated live Gmail integration test."}'}
@@ -153,7 +153,7 @@ async def test_gmail_live_send_and_outbox_persist(monkeypatch: pytest.MonkeyPatc
                         )
                         VALUES (
                             :message_id,
-                            'pdf_ready',
+                            'resume_ready',
                             'ML Engineer',
                             'Acme',
                             'Python and ML role',
@@ -178,7 +178,7 @@ async def test_gmail_live_send_and_outbox_persist(monkeypatch: pytest.MonkeyPatc
                     "company": "Acme",
                     "job_summary": "Python and ML role",
                     "poster_email": settings.sender_email,
-                    "pdf_path": str(pdf_file),
+                    "attachment_path": str(attachment_file),
                 },
                 trace_id=trace_id,
             )
@@ -196,7 +196,7 @@ async def test_gmail_live_send_and_outbox_persist(monkeypatch: pytest.MonkeyPatc
                 await session.execute(
                     text(
                         """
-                        SELECT channel, recipient, status, external_id
+                        SELECT channel, recipient, status, external_id, attachment_path
                         FROM outbox
                         WHERE trace_id = :trace_id
                         """
@@ -210,6 +210,7 @@ async def test_gmail_live_send_and_outbox_persist(monkeypatch: pytest.MonkeyPatc
             assert row[1] == settings.sender_email
             assert row[2] == "sent"
             assert row[3]
+            assert row[4] == str(attachment_file)
     finally:
         await async_engine.dispose()
         clear_settings_cache()

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Literal
 from uuid import UUID
 
 from job_integrations.waha import WAHAConnector
@@ -29,14 +30,19 @@ class WhatsAppMsgAgent(BaseAgent):
             tracer=tracer,
         )
 
-    async def run(self, context: dict[str, Any], trace_id: UUID) -> OutboundResult:
+    async def run(
+        self,
+        context: dict[str, Any],
+        trace_id: UUID,
+        delivery_mode: Literal["send", "draft"] = "send",
+    ) -> OutboundResult:
         poster_number = str(context.get("poster_number") or "").strip()
         if not poster_number:
             raise ValueError("poster_number is required for WhatsApp routing")
 
-        pdf_path = str(context.get("pdf_path") or "").strip() or None
-        if not pdf_path:
-            raise ValueError("pdf_path is required for WhatsApp routing")
+        attachment_path = str(context.get("attachment_path") or "").strip() or None
+        if not attachment_path:
+            raise ValueError("attachment_path is required for WhatsApp routing")
 
         prompt = (
             "Generate a WhatsApp outreach message JSON.\n"
@@ -44,8 +50,11 @@ class WhatsAppMsgAgent(BaseAgent):
             f"job_title: {context.get('job_title')}\n"
             f"company: {context.get('company')}\n"
             f"job_summary:\n{context.get('job_summary')}\n"
+            f"relevance_decision: {context.get('relevance_decision')}\n"
+            f"delivery_mode: {delivery_mode}\n"
+            f"work_type_hints: {self._derive_work_type_hints(str(context.get('job_summary') or ''))}\n"
             f"recipient_number: {poster_number}\n"
-            f"attachment_pdf_path: {pdf_path}\n"
+            f"attachment_path: {attachment_path}\n"
         )
         model_result = await self._call_model(
             messages=[{"role": "user", "content": prompt}],
@@ -62,6 +71,17 @@ class WhatsAppMsgAgent(BaseAgent):
         if not message_text:
             raise ValueError("WhatsApp model output missing message_text")
 
+        if delivery_mode == "draft":
+            return {
+                "sent": False,
+                "channel": "whatsapp",
+                "recipient": poster_number,
+                "subject": None,
+                "body_preview": message_text[:500],
+                "attachment_path": attachment_path,
+                "external_id": None,
+            }
+
         connector = self.connector or WAHAConnector(
             base_url=self.settings.waha_base_url,
             session=self.settings.waha_session,
@@ -72,7 +92,7 @@ class WhatsAppMsgAgent(BaseAgent):
             response = await connector.send_message_with_file(
                 to_number=poster_number,
                 text=message_text,
-                file_path=pdf_path,
+                file_path=attachment_path,
             )
         finally:
             if owns_connector:
@@ -90,8 +110,17 @@ class WhatsAppMsgAgent(BaseAgent):
             "recipient": poster_number,
             "subject": None,
             "body_preview": message_text[:500],
-            "attachment_path": pdf_path,
+            "attachment_path": attachment_path,
             "external_id": external_id,
+        }
+
+    def _derive_work_type_hints(self, job_summary: str) -> dict[str, bool]:
+        job_lower = job_summary.lower()
+        return {
+            "mentions_contract": bool(re.search(r"\b(contract|contractor|contract-to-hire|c2h)\b", job_lower)),
+            "mentions_project": bool(re.search(r"\b(project|project-based|project based)\b", job_lower)),
+            "mentions_c2c": bool(re.search(r"\bc2c\b", job_lower)),
+            "mentions_w2": bool(re.search(r"\bw2\b", job_lower)),
         }
 
     def _extract_external_id(self, payload: Any) -> str | None:

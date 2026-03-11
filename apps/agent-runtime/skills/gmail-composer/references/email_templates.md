@@ -1,7 +1,7 @@
 # Email Templates
 
 ## Template A - Direct application
-Hi {name},
+Hi,
 
 I saw your {job_title} opening at {company}. The role stood out because {specific_hook}.
 
@@ -11,3 +11,10 @@ I attached my tailored resume. If useful, I can do a quick 15-minute call this w
 
 Thanks,
 Pranay
+
+## Template B - Narrower okayish draft
+Hi,
+
+I saw the {job_title} role and there is meaningful overlap with my recent work in {specific_hook}, though the fit is narrower than a direct role in my core track.
+
+I have attached my resume for review. If the background looks close enough, I would be glad to discuss whether it makes sense to continue the conversation.

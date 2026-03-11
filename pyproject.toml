@@ -34,6 +34,7 @@ opentelemetry-exporter-otlp = ">=1.24.0"
 fastapi = ">=0.111.0"
 uvicorn = ">=0.30.0"
 psycopg2-binary = ">=2.9.9"
+pypdf = ">=5.2.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
@@ -47,6 +48,7 @@ factory-boy = ">=3.3.0"
 [tool.pytest.ini_options]
 markers = [
     "live_waha: live WAHA integration tests (opt-in with RUN_LIVE_WAHA_TESTS=1)",
+    "live_anthropic: live Anthropic manager relevance tests (opt-in with RUN_LIVE_ANTHROPIC_TESTS=1)",
 ]
 
 [tool.poetry.scripts]

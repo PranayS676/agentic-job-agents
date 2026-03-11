@@ -3,6 +3,9 @@ data/*.json
 data/*.db
 output/
 __pycache__/
+data/resume-library/*.pdf
+data/resume-tracks/*.json
+data/resume-docx-tracks/*.docx
 
 # Python
 *.pyc
@@ -15,3 +18,4 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+.ai/
